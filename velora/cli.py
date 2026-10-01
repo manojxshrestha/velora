@@ -1336,7 +1336,11 @@ def main(argv: List[str] = None) -> int:
 
     handler = commands.get(args.command)
     if handler:
-        return handler(args)
+        try:
+            return handler(args)
+        except KeyboardInterrupt:
+            print("\ninterrupted -- stopping (exit 130)", file=sys.stderr)
+            return 130
     else:
         parser.print_help()
         return 1

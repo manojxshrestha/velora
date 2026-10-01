@@ -68,8 +68,8 @@ Verify: `velora --help` lists the full interface (scan, exploit, fix, solve, che
 
 ```bash
 # Scan for vulnerabilities (symbolic engine — no model needed)
-velora scan examples/app.py             # bundled intentionally-vulnerable demo
-velora scan src/ --pattern "**/*.py"    # your own code
+velora scan examples/app.py             # bundled intentionally-vulnerable demo, works out of the box
+velora scan src/ --pattern "**/*.py"    # <- replace src/ with a path on YOUR machine
 velora scan src/ --pattern "**/*.java"  # languages auto-detect per file
 
 # Add the AI layer: LLM detection + triage
@@ -108,21 +108,56 @@ velora repl                  # interactive REPL
 
 ### Scan source code
 
-`velora scan` runs the sound symbolic engine — per-language frontends lower source into SIL, taint tracking follows untrusted data, and Z3 discharges the reachability proof. A symbolic bug is reported only when it is provably reachable.
+**The target for `velora scan` is a path on your machine** — a source file or a project directory you have locally. It is *not* a URL (URLs are targets for `velora exploit --target`, see below). Passing a path that doesn't exist gives:
 
-```bash
-velora scan ./repo                          # directory (defaults to **/*.py)
-velora scan ./repo --pattern "**/*.java"    # pick the files explicitly
-velora scan app.py --ai                     # + LLM detect & triage (needs a model)
-velora scan ./repo -f json -o findings.json # machine-readable findings for the loop
-velora scan ./repo --format sarif -o results.sarif --fail-on high   # CI gate
+```text
+Error: Target not found: ./repo
 ```
 
-Directory scans skip agent/tool and dependency directories by default (`.git`, `.claude/worktrees`, `.cursor/worktrees`, `.worktrees`, `.idea`, `.vscode`, `node_modules`, `.venv`, `venv` only if it looks like a virtualenv, `.tox`, `__pycache__`, `.mypy_cache`, `.pytest_cache`); pass `--no-default-excludes` to scan them anyway.
+Either run `velora scan` from inside your project directory, or pass an absolute path.
+
+A guided first run — these exact commands work in a fresh clone:
+
+```bash
+# 1. Scan the bundled intentionally-vulnerable demo (ships with the repo)
+velora scan examples/app.py
+#    -> [CRITICAL] sql_injection    (CWE-89) examples/app.py:20
+#       [CRITICAL] command_injection (CWE-78) examples/app.py:27
+#       ~10 ms, no model needed
+
+# 2. Scan your own project. "." = current directory, --pattern picks the files.
+#    (Replace the path with wherever YOUR code lives.)
+velora scan . --pattern "**/*.py"
+velora scan . --pattern "**/*.java"        # language auto-detected per file
+
+# 3. Machine-readable findings (input for the exploit/fix stages)
+velora scan . --pattern "**/*.py" -f json -o findings.json
+
+# 4. Add the AI layer (LLM detection + triage) -- one-time model setup first:
+velora setup                               # zero-key quickstart, see Model Providers
+velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt
+velora scan . --ai
+
+# 5. CI gate: fail the build on high+ findings (SARIF for code-scanning UIs)
+velora scan . --format sarif -o results.sarif --fail-on high
+```
+
+Symbolic scans (no `--ai`) finish in milliseconds to seconds and never need a model. Each `--ai` file costs one or more LLM calls — seconds on a fast endpoint, tens of seconds on the free tier.
+
+| Goal | Command |
+|------|---------|
+| Scan a single file | `velora scan examples/app.py` |
+| Scan a directory (defaults to `**/*.py`) | `velora scan .` |
+| Pick the files explicitly | `velora scan . --pattern "**/*.js"` |
+| Force a language for odd extensions | `velora scan ./misc -l go --ai` |
+| JSON findings for the loop | `velora scan . -f json -o findings.json` |
+| SARIF + severity gate | `velora scan . --format sarif -o results.sarif --fail-on high` |
+
+<sub>Directory scans skip agent/tool and dependency directories by default (`.git`, `.claude/worktrees`, `.cursor/worktrees`, `.worktrees`, `.idea`, `.vscode`, `node_modules`, `.venv`, `venv` only if it looks like a virtualenv, `.tox`, `__pycache__`, `.mypy_cache`, `.pytest_cache`); pass `--no-default-excludes` to scan them anyway.</sub>
 
 ### The full loop: detect → exploit → fix
 
-With source available, one findings file drives every stage — and the shell is the pipeline:
+With source available, one findings file drives every stage — and the shell is the pipeline. (Paths below are placeholders: swap in your own project; `examples/app.py` works out of the box.)
 
 ```bash
 # 1. detect: symbolic + LLM findings
@@ -149,7 +184,23 @@ Exit codes are scriptable throughout: `exploit` returns 0 only when success was 
 
 When all you have is a URL — `https://target.com` — the source-based `scan` doesn't apply; the black-box path is `velora exploit`. It drives an agent from *your* machine that executes real commands (curl, python, nc, sqlmap, ... installing tools if missing) in a recon → hypothesis → payload → verify loop, and only reports success when it observes an actual state change on the target — never on its own say-so.
 
-**Only test targets you are authorized to attack.** `--target` must be in-scope for you.
+**Only test targets you are authorized to attack.** `--target` must be in-scope for you — practice on a local app you own (e.g. `--target http://localhost:8080`) if you don't have one.
+
+**What a run looks like.** The agent prints every step as it happens, so you are never staring at a blank screen:
+
+```text
+$ velora exploit --target https://target.com --goal 'gain admin access' --max-steps 40
+[velora] using model 'opencode/mimo-v2.6-flash-free' from velora config (...)
+[exploit] step 1/40: thinking...        <- one model round-trip: 30-90 s on the free tier
+[exploit] $ curl -sI https://target.com
+[exploit] step 2/40: thinking...
+[exploit] $ curl -s 'https://target.com/login' -d 'user=admin&pass=x'
+...
+✓ EXPLOITED  (steps=17, reason=objective observed)                # exit code 0
+# or: ✗ NOT EXPLOITED  (steps=40, reason=step budget exhausted)   # exit code 1
+```
+
+**Timing:** each step is one LLM round-trip — 30–90 s on the free tier, so a full 40-step run takes roughly 15–60 minutes. A faster/stronger model (`velora models use zen/glm-5.2`) cuts this dramatically; so does a smaller `--max-steps`. `Ctrl+C` stops cleanly at any point. When pasting multi-line commands, keep each line-ending `\` as the very last character (no trailing spaces) or join them into one line.
 
 ```bash
 # 1. baseline unguided run: recon the surface, then attack the stated goal.
@@ -212,14 +263,25 @@ Practical notes:
     sarif_file: results.sarif
 ```
 
+### Troubleshooting
+
+| Symptom | What it means | Fix |
+|---------|---------------|-----|
+| `Error: Target not found: ./repo` | The `scan` target path doesn't exist on your machine | Check with `ls`; run from inside the project, or use `velora scan examples/app.py` (always present) |
+| `--ai` says no endpoint/model configured | No model set up yet | `velora setup`, then `velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt` |
+| `bridge ... not running` / `velora doctor` exits 1 | Bridge daemon is down | `velora serve-bridge --start` (or run `velora models tui`, which starts it for you) |
+| Exploit sits on `thinking...` for a while | Normal free-tier latency (30–90 s per step) | Wait it out; verify the chain with `velora doctor --probe`; or switch to a faster model |
+| Exploit ends `✗ NOT EXPLOITED` | Step budget ran out or the goal wasn't achieved | Rephrase `--goal`, raise `--max-steps`, use a stronger model, or add `--guidance` from a scan |
+| `velora scan --ai` is slow on first files | Model cold start / bridge warm-up | Normal; later files are faster |
+
 ## Commands
 
 Velora is one CLI covering the whole workflow (detect, triage, exploit, fix) plus the separation-logic solver. Run `velora <command> --help` for all flags.
 
 | Command | What it does |
 |---------|--------------|
-| `velora scan <path>` | Scan source for vulnerabilities (sound symbolic engine; add `--ai` for LLM detection + triage). `-f json\|sarif`, `-o <file>`, `--fail-on <sev>`. |
-| `velora exploit --target <url>` | Drive an LLM agent to exploit a live, authorized target. Prime it with `--guidance <findings.json\|->`. `--goal`, `--success-check`, `--max-steps`, `--trace-out`. |
+| `velora scan <path>` | Scan local source (`<path>` = a file or directory on your machine) for vulnerabilities (sound symbolic engine; add `--ai` for LLM detection + triage). `-f json\|sarif`, `-o <file>`, `--fail-on <sev>`. |
+| `velora exploit --target <url>` | Drive an LLM agent against a live, authorized target (`--target` = a URL). Prime it with `--guidance <findings.json\|->`. `--goal`, `--success-check`, `--max-steps`, `--trace-out`. Prints each step; exit 0 = verified success. |
 | `velora fix <path>` | Generate a fix for each scan finding, then re-scan the patched code to confirm the vulnerability is gone. `--guidance <findings.json\|->`, `--in-place` or `--diff`. |
 | `velora solve "<P> \|- <Q>"` | Check a single separation-logic entailment. |
 | `velora check <file>` | Batch-check entailments (one per line). |

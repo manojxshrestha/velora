@@ -334,3 +334,17 @@ class TestScanLanguageFlag:
         parser = create_parser()
         args = parser.parse_args(["scan", "src/"])
         assert args.language == "python"
+
+
+class TestInterruptHandling:
+    """Ctrl+C must exit cleanly (exit 130), never with a raw traceback."""
+
+    def test_keyboard_interrupt_returns_130(self, monkeypatch, capsys):
+        import velora.cli as cli_mod
+
+        def boom(args):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli_mod, "cmd_solve", boom)
+        assert cli_mod.main(["solve", "x |-> 5 |- x |-> 5"]) == 130
+        assert "interrupted" in capsys.readouterr().err

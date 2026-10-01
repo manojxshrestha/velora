@@ -99,3 +99,32 @@ def test_exploit_prompt_treats_finding_as_lead():
     p = EXPLOIT_SYSTEM.lower()
     assert "lead" in p          # treat the FRAME ANALYSIS finding as a lead, not truth
     assert "pivot" in p         # pivot to other surfaces if the target contradicts it
+
+
+# --- progress output (long free-tier runs must never be silent) -------------------
+
+def test_run_agent_progress_prints_steps_and_commands(capsys):
+    c = _StubClient()
+    run_agent([{"role": "system", "content": "S"}], c,
+              tools=[], exec_tool=lambda n, a: "ok",
+              max_steps=2, check_done=lambda: None,
+              progress=True, progress_label="exploit")
+    out = capsys.readouterr().out
+    assert "[exploit] step 1/2: thinking..." in out
+    assert "[exploit] $ probe" in out
+    assert "[exploit] step 2/2: thinking..." in out
+
+
+def test_run_agent_quiet_by_default(capsys):
+    c = _StubClient()
+    run_agent([{"role": "system", "content": "S"}], c,
+              tools=[], exec_tool=lambda n, a: "ok",
+              max_steps=1, check_done=lambda: None)
+    assert capsys.readouterr().out == ""
+
+
+def test_exploit_enables_progress():
+    import inspect
+    from velora.sil.llm_exploit import exploit_agentic
+    src = inspect.getsource(exploit_agentic)
+    assert "progress=True" in src

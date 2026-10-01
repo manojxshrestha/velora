@@ -172,14 +172,18 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
               stall_nudge: str = DEFAULT_STALL,
               final_nudge: str = DEFAULT_FINAL,
               compact_at_chars: Optional[int] = None,
-              keep_recent: int = 6) -> AgentResult:
+              keep_recent: int = 6,
+              progress: bool = False,
+              progress_label: str = "agent") -> AgentResult:
     """Drive `client` through a tool loop over `messages`.
 
     Exactly one of `finalize` (self-terminating: parse the model's no-tool-call
     output) or `check_done` (oracle-terminating: external success check, non-None
     to stop) should be supplied. When `compact_at_chars` is set, the transcript is
     summarized down once it exceeds that many characters, so long runs stay inside
-    the context window. Returns an AgentResult.
+    the context window. When `progress` is set, every step start and executed
+    command is printed immediately (flushed) so long-running loops are never
+    silent. Returns an AgentResult.
     """
     step = 0
     for step in range(1, max_steps + 1):
@@ -192,12 +196,18 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
         if compact_at_chars and _context_chars(messages) > compact_at_chars:
             messages = _compact_messages(messages, client, keep_recent)
 
+        if progress:
+            print(f"[{progress_label}] step {step}/{max_steps}: thinking...",
+                  flush=True)
         msg = client.chat_raw(messages, tools)
         if msg is None:
             # Transport hiccup. Self-terminating agents stop with an empty result;
             # oracle-driven agents keep trying.
             if finalize is not None:
                 return AgentResult(finalize(""), False, step, messages)
+            if progress:
+                print(f"[{progress_label}] no response from the model -- retrying",
+                      flush=True)
             messages.append({"role": "user", "content": "(no response) Continue: call a tool now."})
             continue
 
@@ -212,6 +222,12 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
                     args = json.loads(fn.get("arguments") or "{}")
                 except (json.JSONDecodeError, TypeError):
                     args = {}
+                if progress:
+                    cmd = str(args.get("cmd") or args or "")
+                    cmd = " ".join(cmd.split())
+                    if len(cmd) > 160:
+                        cmd = cmd[:157] + "..."
+                    print(f"[{progress_label}] $ {cmd}", flush=True)
                 out = exec_tool(fn.get("name", ""), args)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                  "content": (out or "")[:max_tool_output]})
