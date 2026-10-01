@@ -31,7 +31,8 @@ from velora.sil.opencode_bridge import (
     DEFAULT_ENDPOINTS, ProviderCfg, load_setup,
 )
 
-_LOCAL_PROVIDERS = {"ollama", "lmstudio", "llama.cpp"}
+_LOCAL_PROVIDERS = {"ollama", "lmstudio", "llama.cpp", "opencode-bridge"}
+_KEYLESS_PROVIDERS = {"opencode-bridge"}
 _ZEN = "zen"
 
 
@@ -211,8 +212,11 @@ def _resolve_opencode(path: str, args) -> Optional[dict]:
     if not key:
         return {"error": f"no API key for '{pid}' (set one in opencode auth, "
                          f"--api-key, or rerun with a tty)"}
-    return {"provider": pid, "base_url": prov.endpoint, "model": mid,
-            "api_key": key, "source": "opencode"}
+    entry = {"provider": pid, "base_url": prov.endpoint, "model": mid,
+             "api_key": key, "source": "opencode"}
+    if pid in _KEYLESS_PROVIDERS:
+        entry["keyless"] = True
+    return entry
 
 
 def _resolve_generic(path: str, args) -> Optional[dict]:
@@ -223,6 +227,9 @@ def _resolve_generic(path: str, args) -> Optional[dict]:
     pid, mid = path.split("/", 1)
     base = (getattr(args, "base_url", None)
             or DEFAULT_ENDPOINTS.get(pid, "")).rstrip("/")
+    if not base and pid in _KEYLESS_PROVIDERS:
+        from velora.bridge_cli import DEFAULT_BASE_URL
+        base = DEFAULT_BASE_URL
     if not base:
         return {"error": f"no known endpoint for '{pid}': pass --base-url "
                          f"https://... (models.dev gives pricing, not endpoints)"}
@@ -237,8 +244,11 @@ def _resolve_generic(path: str, args) -> Optional[dict]:
     if not key:
         return {"error": f"no API key for '{pid}': pass --api-key or rerun "
                          f"with a tty to prompt"}
-    return {"provider": pid, "base_url": base, "model": mid,
-            "api_key": key, "source": "velora-models"}
+    entry = {"provider": pid, "base_url": base, "model": mid,
+             "api_key": key, "source": "velora-models"}
+    if pid in _KEYLESS_PROVIDERS:
+        entry["keyless"] = True
+    return entry
 
 
 def cmd_use(args) -> int:
@@ -259,17 +269,23 @@ def cmd_use(args) -> int:
     if "error" in entry:
         return _err(entry["error"])
     prev = model_config.active()
+    keyless = bool(entry.get("keyless"))
     path = model_config.save(
         provider=entry["provider"], base_url=entry["base_url"],
         model=entry["model"], source=entry.get("source", "velora-models"),
-        api_key=entry.get("api_key"),
+        api_key=None if keyless else entry.get("api_key"),
     )
     replaced = (f" (replaces {prev['provider']}/{prev['model']})" if prev else "")
     print(f"Active model set: {entry['provider']}/{entry['model']} -> "
           f"{entry['base_url']}{replaced}")
-    print(f"Saved to {path}; credentials 0600. "
-          f"`velora scan --ai` picks this up automatically "
-          f"(VELORA_LLM_* env still wins).")
+    if keyless:
+        print(f"Saved to {path} (no API key stored). "
+              f"`velora scan --ai` picks this up automatically "
+              f"(VELORA_LLM_* env still wins).")
+    else:
+        print(f"Saved to {path}; credentials 0600. "
+              f"`velora scan --ai` picks this up automatically "
+              f"(VELORA_LLM_* env still wins).")
     return 0
 
 
@@ -393,11 +409,17 @@ def cmd_import_opencode(args) -> int:
 # entry point
 # ---------------------------------------------------------------------------
 
+def _cmd_tui(args) -> int:
+    from velora.models_tui import cmd_tui
+    return cmd_tui(args)
+
+
 def cmd_models(args) -> int:
     action = getattr(args, "models_action", None) or "list"
     handlers = {
         "list": cmd_list, "use": cmd_use, "current": cmd_current,
         "providers": cmd_providers, "import-opencode": cmd_import_opencode,
+        "tui": _cmd_tui,
     }
     handler = handlers.get(action)
     if handler is None:

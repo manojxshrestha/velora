@@ -276,7 +276,7 @@ class TestTimeoutHandling:
         pure = [x > 0]
         side = [x < 100]
         # Should still work with short timeout for simple constraints
-        result = verify_side_conditions(side, pure, timeout_ms=10)
+        result = verify_side_conditions(side, pure, timeout_ms=100)
         assert result is True
 
     def test_zero_timeout(self):

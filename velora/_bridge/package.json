@@ -1,0 +1,17 @@
+{
+  "name": "velora-opencode-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenAI-compatible bridge to opencode for Velora -- opencode provider models, zero API keys in Velora",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.18.34"
+  }
+}

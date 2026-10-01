@@ -59,6 +59,23 @@ pip install -r requirements.txt
 python -c "from velora import EntailmentChecker; checker = EntailmentChecker(); print(checker.check_entailment('x |-> 5 * y |-> 3 |- x |-> 5'))"
 ```
 
+### Zero-Key AI Mode (opencode bridge)
+```bash
+velora doctor                # diagnose: platform, node/opencode, daemon, model (exit 1 when not ready)
+velora setup                 # one-time bootstrap: install missing prereqs user-local (no sudo), start bridge
+
+velora serve-bridge --start  # daemon on port 8399 (--stop/--status, --format json)
+velora serve-bridge          # alternative: run in the foreground
+velora models tui            # interactive picker: bridge + local servers (auto-starts the bridge)
+                            #   extras: --local-url NAME=URL or VELORA_LOCAL_URLS=...
+velora models use opencode-bridge/opencode/<model> --no-prompt   # non-TTY alternative
+velora scan src/ --ai               # uses the active config model
+
+# Bridge sources + Node unit tests (packaged at velora/_bridge, seeded to
+# $XDG_DATA_HOME/velora/bridge at runtime)
+cd velora/_bridge && npm install && node --test server.test.js
+```
+
 ## Architecture
 
 The codebase is organized into logical modules for better maintainability:

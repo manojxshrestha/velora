@@ -351,7 +351,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     models_parser.add_argument(
         "models_action", nargs="?", default="list",
-        choices=["list", "use", "current", "providers", "import-opencode"],
+        choices=["list", "use", "current", "providers", "import-opencode",
+                 "tui"],
         help="Action (default: list)"
     )
     models_parser.add_argument(
@@ -379,6 +380,76 @@ def create_parser() -> argparse.ArgumentParser:
                                help="Never prompt for an API key")
     models_parser.add_argument("--limit", type=int,
                                help="Max rows for `list --registry`")
+    models_parser.add_argument("--local-url", action="append",
+                               metavar="[NAME=]URL",
+                               help="Extra local OpenAI-compatible endpoint "
+                                    "for `tui` (repeatable), e.g. "
+                                    "optiq=http://localhost:47317/v1")
+
+    # === serve-bridge command ===
+    serve_bridge_parser = subparsers.add_parser(
+        "serve-bridge",
+        help="Run the local OpenAI-compatible bridge to opencode (zero-key --ai)",
+        description="Expose opencode's models (incl. free Zen tier) as a local "
+                    "OpenAI-compatible server for `velora scan --ai`. opencode "
+                    "holds all API keys; Velora stores none."
+    )
+    bridge_group = serve_bridge_parser.add_mutually_exclusive_group()
+    bridge_group.add_argument("--start", dest="bridge_cmd",
+                              action="store_const", const="start",
+                              help="run in the background (pidfile + log)")
+    bridge_group.add_argument("--stop", dest="bridge_cmd",
+                              action="store_const", const="stop",
+                              help="stop the background daemon")
+    bridge_group.add_argument("--status", dest="bridge_cmd",
+                              action="store_const", const="status",
+                              help="report daemon health (exit 0 when healthy)")
+    serve_bridge_parser.set_defaults(bridge_cmd=None)
+    serve_bridge_parser.add_argument("--format", default="text",
+                                     choices=["text", "json"],
+                                     help="Output format for --status")
+    serve_bridge_parser.add_argument("--port", type=int, default=8399,
+                                     help="Bridge port (default: 8399)")
+    serve_bridge_parser.add_argument("--opencode-port", type=int, default=4599,
+                                     help="Port for the opencode server the "
+                                          "bridge spawns (default: 4599)")
+    serve_bridge_parser.add_argument("--configure", action="store_true",
+                                     help="Persist the active model in velora "
+                                          "config once the bridge is healthy")
+    serve_bridge_parser.add_argument("--model",
+                                     help="Model id (e.g. "
+                                          "opencode/mimo-v2.6-flash-free) for "
+                                          "--configure")
+
+    # === doctor command ===
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Diagnose the zero-key AI setup (exit 1 when not ready)",
+        description="Checks platform, node/opencode binaries, bridge deps, "
+                    "daemon health, active model and local endpoints; each "
+                    "failure comes with the exact fix command."
+    )
+    doctor_parser.add_argument("--probe", action="store_true",
+                               help="Send one test chat through the bridge "
+                                    "(slow: verifies free-tier access for real)")
+    doctor_parser.add_argument("--format", default="text",
+                               choices=["text", "json"],
+                               help="Output format")
+
+    # === setup command ===
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="One-time bootstrap: install missing prerequisites (no sudo)",
+        description="Runs `velora doctor`, shows exactly what it will install "
+                    "(user-local Node + opencode + bridge deps), asks once, "
+                    "then starts the bridge and verifies keyless access."
+    )
+    setup_parser.add_argument("--yes", action="store_true",
+                              help="Assume yes at the consent prompt")
+    setup_parser.add_argument("--no-start", action="store_true",
+                              help="Do not start the bridge daemon at the end")
+    setup_parser.add_argument("--no-probe", action="store_true",
+                              help="Skip the live keyless probe chat")
 
     return parser
 
@@ -1224,6 +1295,21 @@ def _cmd_models(args) -> int:
     return cmd_models(args)
 
 
+def _cmd_serve_bridge(args) -> int:
+    from velora.bridge_cli import cmd_serve_bridge
+    return cmd_serve_bridge(args)
+
+
+def _cmd_doctor(args) -> int:
+    from velora.doctor_cli import cmd_doctor
+    return cmd_doctor(args)
+
+
+def _cmd_setup(args) -> int:
+    from velora.setup_cli import cmd_setup
+    return cmd_setup(args)
+
+
 def main(argv: List[str] = None) -> int:
     """Main CLI entry point"""
     parser = create_parser()
@@ -1243,6 +1329,9 @@ def main(argv: List[str] = None) -> int:
         "parse": cmd_parse,
         "repl": cmd_repl,
         "models": _cmd_models,
+        "serve-bridge": _cmd_serve_bridge,
+        "doctor": _cmd_doctor,
+        "setup": _cmd_setup,
     }
 
     handler = commands.get(args.command)

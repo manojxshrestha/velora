@@ -91,8 +91,9 @@ velora scan src/ --pattern "**/*.py"
 velora scan src/ --pattern "**/*.java"
 velora scan src/ --pattern "**/*.go" --ai -l go   # no symbolic frontend: LLM tier only
 
-# AI-assisted scan: LLM detection + triage (set a model first, see Model Providers)
-velora models use zen/glm-5.2    # or export VELORA_LLM_BASE_URL / _MODEL / _API_KEY
+# AI-assisted scan: LLM detection + triage (pick a model first)
+velora setup && velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt  # zero-key
+# or: velora models use zen/glm-5.2, or export VELORA_LLM_BASE_URL / _MODEL / _API_KEY
 velora scan src/ --ai
 
 # CI/CD integration (SARIF output)
@@ -265,6 +266,54 @@ result = scanner.scan_file("Controller.java")
 
 ## Model Providers
 
+### Zero-key quickstart (no API key)
+
+```bash
+velora doctor                              # 1. diagnose; exit 1 while something is missing
+velora setup                               # 2. install what's missing user-local (no sudo), start the bridge
+velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt   # 3. pick a free Zen model (keyless)
+velora scan src/ --ai                      # 4. scan through the local bridge — free tier, zero keys
+```
+
+The bridge (`velora serve-bridge`) is a local OpenAI-compatible server on `:8399` that proxies opencode's own client — opencode owns every credential, so Velora stores none. `velora setup` installs missing prerequisites (Node ≥ 18 into `~/.local/opt`, the `opencode` CLI, bridge dependencies) after a single consent prompt; it is idempotent, and `--yes` makes it non-interactive. `velora doctor --probe` sends one real keyless chat to verify the whole chain end to end, and `velora models tui` auto-starts the bridge when you pick a model.
+
+Supported platforms: **Linux (incl. WSL) and macOS**. On native Windows, use `wsl --install` and run everything inside WSL — the bridge will not start from a Windows shell.
+
+#### Full usage on a target
+
+Everything below runs with zero keys once the 4 commands above have run once. The full loop — detect, exploit, fix, re-confirm — on a target repo plus a live (authorized) target:
+
+```bash
+# --- one-time per machine ---
+velora doctor                    # what's missing (exit 1 until ready)
+velora setup                     # install prereqs user-local, seed the bridge, start it, verify with a live probe
+velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt
+
+# --- 1. detect: scan the target's source (symbolic + LLM) ---
+velora scan ./target-app --ai -f json -o findings.json
+velora scan ./target-app --ai                    # human-readable report instead
+velora scan ./target-app --ai --fail-on high     # CI gate (exit 1 on high+)
+
+# --- 2. exploit: drive the PoC against a live, authorized target ---
+#     --guidance localizes the attack to the proven/likely-flawed parameter
+velora exploit --target http://localhost:8080 --guidance findings.json \
+  --goal 'read the admin secret' \
+  --success-check 'curl -sf http://localhost:8080/pwned'
+
+# --- 3. fix: patch, then re-scan to prove the finding is gone ---
+velora fix ./target-app/app.py --guidance findings.json --diff
+velora fix ./target-app/app.py --guidance findings.json --in-place
+velora scan ./target-app --ai                    # re-run: the finding should disappear
+
+# --- bridge & model management ---
+velora doctor --probe           # end-to-end: one real keyless chat through the bridge
+velora serve-bridge --status    # daemon state (also: --start / --stop, --format json)
+velora serve-bridge --stop      # stop the daemon (models tui auto-restarts it on demand)
+velora models current           # what model is active and where it came from
+```
+
+The daemon runs on `http://127.0.0.1:8399` with a log at `$XDG_STATE_HOME/velora/bridge.log`; the symbolically-proven findings (`Source: symbolic`) need no model at all, so the loop still works even if you only run `velora scan ./target-app` with no `--ai`.
+
 `velora models` browses and switches the AI model behind `--ai`. Two sources are built in:
 
 - **OpenCode Zen** — curated gateway (`https://opencode.ai/zen/v1`) with a **free tier** (e.g. `mimo-v2.6-flash-free`, `nemotron-3-ultra-free`, `ling-3.0-flash-fin-free`) and cheap pay-as-you-go models like `glm-5.2` ($1.40/$4.40 per 1M). Free hosted = no local RAM at all.
@@ -285,11 +334,14 @@ All actions:
 velora models list                 # Zen catalog: free first, ✓ = usable by Velora
 velora models list --free          # only free models
 velora models list --registry      # full models.dev registry (filter: --query glm)
+velora models tui                  # full-screen picker: opencode bridge + local servers
 velora models use zen/glm-5.2      # activate a model (prompts for the API key once)
 velora models current              # what's active and where it came from
 velora models providers            # velora config, env keys, and opencode providers
 velora models import-opencode      # reuse your existing opencode setup + keys
 ```
+
+`velora models tui` probes every source at once and saves your pick keyless: the local opencode bridge (`velora serve-bridge --start` runs it as a daemon; `models tui` auto-starts it, free Zen tier) plus any running local server — mlx-optiq on `:47317` (the setup above), Ollama on `:11434`, LM Studio, llama.cpp, vLLM — with extras via `--local-url NAME=URL` or `VELORA_LOCAL_URLS=NAME=URL,...`. Local servers need no key, so none is stored.
 
 `use` also accepts `opencode/<provider>/<model>` (reuse an opencode provider) or `<provider>/<model> --base-url <endpoint>` for any OpenAI-compatible server (Ollama, vLLM, ...). Keys are stored `0600` in `~/.config/velora/credentials.json` (override the directory with `VELORA_CONFIG_HOME`).
 

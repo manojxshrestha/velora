@@ -88,6 +88,10 @@ Issues = "https://github.com/manojxshrestha/velora/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["velora*"]
+exclude = ["*node_modules*"]
+
+[tool.setuptools.package-data]
+"velora._bridge" = ["*.js", "*.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "velora.__version__"}
