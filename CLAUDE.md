@@ -167,7 +167,7 @@ velora/
 
 ### Key Design Decisions
 
-**Theoretical Foundation**: Velora implements separation logic (Reynolds & O'Hearn, 2002) using SMT-based reasoning with Z3. The core technique is the heap-as-array encoding (Piskac, Wies, Zufferey, 2013), which reduces separation logic entailments to first-order logic queries. See README.md "The Symbolic Core: Separation Logic + Z3" section for detailed references and comparison with other solvers (Sleek, Cyclist, Grasshopper, SPEN).
+**Theoretical Foundation**: Velora implements separation logic (Reynolds & O'Hearn, 2002) using SMT-based reasoning with Z3. The core technique is the heap-as-array encoding (Piskac, Wies, Zufferey, 2013), which reduces separation logic entailments to first-order logic queries. See docs/api.md "The Symbolic Core: Separation Logic + Z3" section for detailed references and comparison with other solvers (Sleek, Cyclist, Grasshopper, SPEN).
 
 **Heap Representation**: Heap is a Z3 array `heap: Loc -> Val`. Domain is tracked as a set of locations. Disjointness enforced by ensuring domains don't overlap in separating conjunction.
 
@@ -256,7 +256,7 @@ def test_something():
 
 SL-COMP benchmarks test against industry-standard separation logic problems. Key divisions:
 - `qf_shls_entl`: List segments with entailments
-- Results tracked in `docs/archive/` for performance comparison
+- Results tracked in `benchmarks/README.md` for performance comparison
 
 ## Common Issues
 
