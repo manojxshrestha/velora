@@ -1,12 +1,26 @@
-# Velora
+<h1 align="center">
+  <br>
+  <img src="assets/logo-icon.png" alt="Velora" width="600">
+  <br>
+  Velora
+  <br>
+</h1>
 
-[![Tests](https://github.com/manojxshrestha/velora/actions/workflows/tests.yml/badge.svg)](https://github.com/manojxshrestha/velora/actions/workflows/tests.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+<h4 align="center">Sound static analysis + LLM agent in one loop — detect → exploit → fix · 5 languages · zero-key AI · separation logic + Z3</h4>
 
-Velora is a neuro-symbolic security agent. A sound static-analysis core — taint analysis plus separation-logic verification with Z3 — is fused with an LLM layer in one loop: **the model proposes, the sound core disposes.**
+<p align="center">
+  <a href="https://github.com/manojxshrestha/velora/actions/workflows/tests.yml"><img src="https://github.com/manojxshrestha/velora/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
+</p>
 
-It runs the whole loop end to end: detect vulnerabilities across 5 languages, exploit them with a working proof-of-concept against a live target, fix the code, then re-scan to confirm the bug is gone. Symbolic findings are proven, not guessed; LLM findings are tiered separately so the two are never confused. On independent real-world benchmarks Velora is competitive with commercial AI-SAST vendors, and it scores 80%+ on the synthetic OWASP suites. The LLM layer runs on any OpenAI-compatible endpoint — local or hosted, including a **zero-key free tier** (`velora setup`).
+<p align="center">
+  Velora is a neuro-symbolic security agent. A sound static-analysis core — taint analysis plus separation-logic verification with Z3 — is fused with an LLM layer in one loop: <b>the model proposes, the sound core disposes.</b>
+</p>
+
+<p align="center">
+  It runs the whole loop end to end: detect vulnerabilities across 5 languages, exploit them with a working proof-of-concept against a live target, fix the code, then re-scan to confirm the bug is gone. Symbolic findings are proven, not guessed; LLM findings are tiered separately so the two are never confused. On independent real-world benchmarks Velora is competitive with commercial AI-SAST vendors, and it scores 80%+ on the synthetic OWASP suites. The LLM layer runs on any OpenAI-compatible endpoint — local or hosted, including a <b>zero-key free tier</b> (<code>velora setup</code>).
+</p>
 
 **Contents** — [Highlights](#highlights) · [Documentation](#documentation) · [Quick Start](#quick-start)
 
