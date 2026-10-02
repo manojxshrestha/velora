@@ -25,7 +25,7 @@
   It runs the whole loop end to end: detect vulnerabilities across 5 languages, exploit them with a working proof-of-concept against a live target, fix the code, then re-scan to confirm the bug is gone. Symbolic findings are proven, not guessed; LLM findings are tiered separately so the two are never confused. On independent real-world benchmarks Velora is competitive with commercial AI-SAST vendors, and it scores 80%+ on the synthetic OWASP suites. The LLM layer runs on any OpenAI-compatible endpoint — local or hosted, including a <b>zero-key free tier</b> (<code>velora setup</code>).
 </p>
 
-**Contents** — [Highlights](#highlights) · [Documentation](#documentation) · [Quick Start](#quick-start)
+**Contents** — [Highlights](#highlights) · [Documentation](#documentation) · [Quick Start](#quick-start) · [What next](#what-next)
 
 ## Highlights
 
@@ -142,4 +142,12 @@ velora repl                  # interactive REPL
 ```
 
 </details>
+
+## What next
+
+- **Patch what you find** — [Fix findings](docs/usage.md#fix-findings): preview a minimal diff, apply it, and re-scan to *prove* the vulnerability is gone.
+- **Hunt bugs on a live target** — [Bug hunting guide](docs/usage.md#bug-hunting-guide-worked-example-examplecom): a full black-box campaign, step by step, with goal recipes per vulnerability class.
+- **Wire it into CI** — [CI/CD Integration](docs/usage.md#cicd-integration): SARIF output + severity gate for GitHub Actions.
+- **Set up the AI layer** — [Setup](docs/installation.md#setup): zero-key bridge, `velora models tui` picker, environment variables.
+- **Embed it** — [Python API](docs/api.md#python-api) or the [full command reference](docs/usage.md#commands).
 

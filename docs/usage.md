@@ -175,6 +175,13 @@ A compact black-box campaign you can copy, one hypothesis at a time.
 
 **Authorization first.** Only test targets you own or are explicitly in scope for. `example.com` is IANA's reserved *documentation* domain — treat it purely as a placeholder below and swap in your authorized target (your own app, `python examples/practice_target.py` for a local one, or a bug-bounty program's listed scope).
 
+**Step 0 — One-time setup.** Confirm the zero-key chain works and pick your model (the strongest you have — exploitation is where model quality matters most):
+
+```bash
+velora setup && velora doctor --probe   # bootstrap + one real keyless chat (exit 0 = ready)
+velora models tui                       # full-screen picker: opencode bridge + local servers
+```
+
 **Step 1 — Recon run (unguided).** Let the agent map the surface and attack a stated goal. Exit 0 = verified win; exit 1 = iterate on the goal wording:
 
 ```bash
@@ -196,6 +203,19 @@ velora exploit --target https://example.com \
   --goal 'look for IDOR: change numeric ids on resource endpoints and see if other records are returned' --max-steps 40
 ```
 
+Goal recipes by vulnerability class — swap any of these straight into `--goal`:
+
+| Goal class | Example `--goal` wording |
+|---|---|
+| SQL / NoSQL injection | `test every search/query parameter for SQL injection; try error-based, boolean, and time-based techniques` |
+| XSS | `find a reflected or stored cross-site scripting sink on any user-controlled parameter` |
+| Command injection | `check whether any form or API parameter reaches a shell command on the server` |
+| SSRF | `look for a URL/webhook parameter and point it at 169.254.169.254 to read cloud metadata` |
+| Auth / session | `attempt login bypass: default credentials, password-reset flaws, JWT or session tampering` |
+| IDOR / authorization | `change numeric ids on resource endpoints; check for horizontal and vertical privilege gaps` |
+| File upload | `test the upload feature for unrestricted file types leading to code execution` |
+| Secrets / info leak | `search responses, JS bundles, and common backup paths for hardcoded keys or tokens` |
+
 **Step 3 — Pin "success" with an oracle.** Your command is re-run after every step; exit 0 means solved, and it overrides any stale agent claim:
 
 ```bash
@@ -210,6 +230,15 @@ velora exploit --target https://example.com \
 velora exploit --target https://example.com --goal '…' \
   --trace-out trace.json --format json > report.json
 ```
+
+**Reading the results.** Every run ends with one of these:
+
+| Ending | Exit | What it means | Next move |
+|---|:---:|---|---|
+| `✓ EXPLOITED (steps=N, reason=objective observed)` | 0 | A state change was *observed* on the target — a real, verified win | Save `--trace-out`, keep the output as evidence, feed the detail into the next goal |
+| `✓ EXPLOITED` + `[success-check] <evidence>` | 0 | Your oracle command exited 0 — authoritative, overrides any agent claim | Same as above; prefer this ending whenever you can write an oracle |
+| `✗ NOT EXPLOITED (… step budget exhausted)` | 1 | Out of steps before the goal was achieved | Raise `--max-steps`, narrow the goal, or split it into smaller hypotheses |
+| `✗ NOT EXPLOITED (… model unreachable after N failed attempts)` | 1 | The endpoint is down after automatic retries | `velora doctor --probe`, `velora serve-bridge --start`, check `~/.local/state/velora/bridge.log` |
 
 **Loop:** feed each success back into the next goal's wording, and stop when the step budget stops paying off. If you ever get the source, add `--guidance findings.json` from a `velora scan` (grey-box) and the same runs converge far faster. Flags and budgets: [Black-box testing a live target](#black-box-testing-a-live-target-no-source) above.
 
