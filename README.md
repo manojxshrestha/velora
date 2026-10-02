@@ -25,6 +25,22 @@
   It runs the whole loop end to end: detect vulnerabilities across 5 languages, exploit them with a working proof-of-concept against a live target, fix the code, then re-scan to confirm the bug is gone. Symbolic findings are proven, not guessed; LLM findings are tiered separately so the two are never confused. On independent real-world benchmarks Velora is competitive with commercial AI-SAST vendors, and it scores 80%+ on the synthetic OWASP suites. The LLM layer runs on any OpenAI-compatible endpoint — local or hosted, including a <b>zero-key free tier</b> (<code>velora setup</code>).
 </p>
 
+<details>
+<summary><strong>What "neuro-symbolic security agent" means</strong></summary>
+
+Velora is a *neuro-symbolic* system: a proof-producing **symbolic** core and a language-model **neuro** runtime operate as a single agent across the `scan → exploit → fix` loop.
+
+| | Symbolic core | LLM agent |
+|---|---|---|
+| Discipline | Formal methods — separation logic encoded in the Z3 SMT solver | Machine learning — a language model that reads code and drives tools |
+| Contribution | **Proves** reachability: a finding is reported only when it is mathematically verified — *sound* means zero false positives | Supplies the context formal methods cannot express — business intent, framework semantics, cross-file data flows |
+| Limitation | Confined to what it can encode | Cannot prove; its claims stay provisional until independently checked |
+| Role in the loop | Adjudicates: proven and LLM-tier findings are never conflated, and an exploit concludes only on an observed state change or a passing shell oracle | Proposes: candidate findings, triage decisions, exploit steps |
+
+**The model proposes, the sound core disposes** — the coverage of an LLM with the assurance of a proof.
+
+</details>
+
 **Contents** — [Highlights](#highlights) · [Documentation](#documentation) · [Quick Start](#quick-start) · [What next](#what-next)
 
 ## Highlights
