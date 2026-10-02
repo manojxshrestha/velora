@@ -66,30 +66,59 @@ Verify: `velora --help` lists the full interface (scan, exploit, fix, solve, che
 
 ## Quick Start
 
+Every command below runs as-is in a fresh clone. Copy them in order.
+
+**1 — Scan a file.** The target for `velora scan` is a path **on your machine** (a file or a folder, never a URL). This demo file ships with the repo and is intentionally vulnerable:
+
 ```bash
-# Scan for vulnerabilities (symbolic engine — no model needed)
-velora scan examples/app.py             # bundled intentionally-vulnerable demo, works out of the box
-velora scan src/ --pattern "**/*.py"    # <- replace src/ with a path on YOUR machine
-velora scan src/ --pattern "**/*.java"  # languages auto-detect per file
-
-# Add the AI layer: LLM detection + triage
-velora setup                                                    # one-time: zero-key bridge (see Model Providers)
-velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt
-velora scan src/ --ai
-
-# Separation-logic solver
-velora solve "ls(x, y) * ls(y, z) |- ls(x, z)"
+velora scan examples/app.py
+# -> Vulnerabilities Found: 2
+#    1. [CRITICAL] sql_injection     login  examples/app.py:20  CWE-89
+#    2. [CRITICAL] command_injection run    examples/app.py:27  CWE-78     ~10 ms, no model needed
 ```
+
+**2 — Scan a folder.** Point `velora scan` at any project directory. A folder scan picks Python files by default (`**/*.py` = “any `.py` file, here or in any subfolder”); `--pattern` changes which files it picks:
+
+```bash
+velora scan .                                  # the folder you are standing in right now
+velora scan /path/to/your/project              # any directory on your machine
+velora scan /path/to/your/project --pattern "**/*.java"   # only its Java files
+```
+
+**3 — Scan with AI.** `--ai` adds LLM detection + triage on top of the symbolic engine. One-time model setup first (zero-key, no API key needed):
+
+```bash
+velora setup                                   # installs & starts the local model bridge
+velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt   # pick the free model
+velora scan . --ai
+```
+
+**4 — Built-in separation-logic solver.** Velora's soundness core, exposed directly — ask whether one heap description implies another, e.g. “two joined list segments (whose ends differ) imply one whole list”:
+
+```bash
+velora solve "ls(x, y) * ls(y, z) * x != z |- ls(x, z)"   # prints: VALID
+```
+
+Anatomy of a scan command:
+
+| Piece | Meaning |
+|---|---|
+| `examples/app.py` or `.` | **the target** — a file/folder path on your machine (not a URL) |
+| `.` vs `/path/to/project` | `.` = current directory; any absolute or relative path works |
+| `--pattern "**/*.java"` | file filter inside the folder (`**` = every subfolder; default `**/*.py`) |
+| `--ai` | add the LLM detect + triage layer (needs a model — step 3) |
+| `-f json -o findings.json` | write findings as JSON (feeds `exploit` / `fix`) |
+| `--format sarif` / `--fail-on high` | CI output format / minimum severity that fails the build |
 
 <details>
 <summary><strong>More examples</strong></summary>
 
 ```bash
 # Any language, LLM tier only (no symbolic frontend)
-velora scan src/ --pattern "**/*.go" --ai -l go
+velora scan /path/to/project --pattern "**/*.go" --ai -l go
 
 # CI/CD gate (SARIF output)
-velora scan src/ --format sarif -o results.sarif --fail-on high
+velora scan . --format sarif -o results.sarif --fail-on high
 
 # Exploit a finding against a live, authorized target (primed by a scan)
 velora exploit --target http://localhost:8080 --guidance findings.json
@@ -184,7 +213,7 @@ Exit codes are scriptable throughout: `exploit` returns 0 only when success was 
 
 When all you have is a URL — `https://target.com` — the source-based `scan` doesn't apply; the black-box path is `velora exploit`. It drives an agent from *your* machine that executes real commands (curl, python, nc, sqlmap, ... installing tools if missing) in a recon → hypothesis → payload → verify loop, and only reports success when it observes an actual state change on the target — never on its own say-so.
 
-**Only test targets you are authorized to attack.** `--target` must be in-scope for you — practice on a local app you own (e.g. `--target http://localhost:8080`) if you don't have one.
+**Only test targets you are authorized to attack.** `--target` must be in-scope for you — practice on a local app you own. The repo ships a throwaway one built for this: `python examples/practice_target.py` serves an app on `http://127.0.0.1:8080` whose goal is to steal the admin flag from `/admin` and POST it to `/report` (the `--success-check` above then turns 200).
 
 **What a run looks like.** The agent prints every step as it happens, so you are never staring at a blank screen:
 
@@ -251,7 +280,7 @@ Practical notes:
   run: pip install -e ".[scan]"
 
 - name: Security Scan
-  run: velora scan src/ --format sarif -o results.sarif --fail-on high
+  run: velora scan . --format sarif -o results.sarif --fail-on high
   env:                          # only needed for --ai; the symbolic engine needs no model
     VELORA_LLM_BASE_URL: ${{ vars.VELORA_LLM_BASE_URL }}
     VELORA_LLM_MODEL: ${{ vars.VELORA_LLM_MODEL }}
@@ -432,7 +461,7 @@ Rule of thumb: ~**0.5–0.6 GB per 1B parameters** at 4-bit quantization (all we
 ollama pull qwen3:4b
 export VELORA_LLM_BASE_URL=http://localhost:11434/v1
 export VELORA_LLM_MODEL=qwen3:4b
-velora scan src/ --ai
+velora scan . --ai
 ```
 
 Expectation setting: the benchmark results were produced with the 35B local model and hosted GLM-5.2 — a 4B model on CPU will be noticeably weaker and slower at triage/exploitation. The symbolic engine (`velora scan` without `--ai`) is unaffected and runs identically on any machine above.
@@ -445,7 +474,7 @@ Expectation setting: the benchmark results were produced with the 35B local mode
 velora doctor                              # 1. diagnose; exit 1 while something is missing
 velora setup                               # 2. install what's missing user-local (no sudo), start the bridge
 velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt   # 3. pick a free Zen model (keyless)
-velora scan src/ --ai                      # 4. scan through the local bridge — free tier, zero keys
+velora scan . --ai                         # 4. scan through the local bridge — free tier, zero keys
 ```
 
 The bridge (`velora serve-bridge`) is a local OpenAI-compatible server on `:8399` that proxies opencode's own client — opencode owns every credential, so Velora stores none. `velora setup` installs missing prerequisites (Node ≥ 18 into `~/.local/opt`, the `opencode` CLI, bridge dependencies) after a single consent prompt; it is idempotent, and `--yes` makes it non-interactive. The daemon logs to `$XDG_STATE_HOME/velora/bridge.log`.
@@ -472,7 +501,7 @@ A Zen key is free from [opencode.ai](https://opencode.ai):
 export OPENCODE_API_KEY=sk-...        # free key; `use` prompts for it on a tty otherwise
 velora models list --free             # browse free models
 velora models use mimo-v2.6-flash-free
-velora scan src/ --ai                 # zero local RAM: inference is hosted
+velora scan . --ai                    # zero local RAM: inference is hosted
 ```
 
 ### All model actions
@@ -533,7 +562,7 @@ verifying heap properties:
 **Built-in predicates:** `ls(x,y)`, `list(x)`, `tree(x)`, `dll(x,p,y,n)`
 
 ```bash
-velora solve "ls(x, y) * ls(y, z) |- ls(x, z)"  # list-segment transitivity
+velora solve "ls(x, y) * ls(y, z) * x != z |- ls(x, z)"  # list-segment transitivity
 ```
 
 The core is validated on the standard logic suites: SL-COMP (separation logic) at

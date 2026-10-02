@@ -69,7 +69,7 @@ velora serve-bridge          # alternative: run in the foreground
 velora models tui            # interactive picker: bridge + local servers (auto-starts the bridge)
                             #   extras: --local-url NAME=URL or VELORA_LOCAL_URLS=...
 velora models use opencode-bridge/opencode/<model> --no-prompt   # non-TTY alternative
-velora scan src/ --ai               # uses the active config model
+velora scan . --ai                    # uses the active config model
 
 # Bridge sources + Node unit tests (packaged at velora/_bridge, seeded to
 # $XDG_DATA_HOME/velora/bridge at runtime)

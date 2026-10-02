@@ -11,8 +11,8 @@ Usage:
     # Scan with SARIF output (for GitHub Actions)
     python -m velora.sil.cli scan app.py --format sarif -o results.sarif
 
-    # Scan a directory
-    python -m velora.sil.cli scan src/ --pattern "**/*.py"
+    # Scan a directory (current folder; --pattern picks the files)
+    python -m velora.sil.cli scan . --pattern "**/*.py"
 
     # Scan without verification (faster, may have FPs)
     python -m velora.sil.cli scan app.py --no-verify

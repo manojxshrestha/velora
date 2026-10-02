@@ -275,6 +275,43 @@ def test_pto_with_constructor():
     print("✓ Points-to with constructor parsed correctly")
 
 
+def test_neq_operator_lexing():
+    """
+    Regression test for the '!=' lexer ordering bug.
+
+    The TOKEN_PATTERNS list declared NOT ('!') before NEQ ('!='), and the
+    lexer takes the first matching pattern. Every '!=' therefore lexed as
+    NOT + EQ, so ANY string formula containing '!=' failed to parse with
+    "Unexpected variable x without operator". Prefix negation (!x = 5)
+    must keep working after the reorder.
+    """
+    print("\n=== Testing != Lexing ===")
+    from velora.core.parser import parse, parse_entailment
+
+    for text in ("x != nil", "x != 5", "x != y"):
+        formula = parse(text)
+        assert isinstance(formula, Neq), f"{text!r} should parse to Neq, got {formula!r}"
+    print("✓ Bare disequality parses (x != v)")
+
+    negated = parse("!x = 5")
+    assert isinstance(negated, Not), f"Prefix ! should stay NOT, got {negated!r}"
+    assert isinstance(negated.formula, Eq)
+    print("✓ Prefix negation (!x = 5) still parses")
+
+    ante, cons = parse_entailment("x != 5 |- x != 5")
+    assert isinstance(ante, Neq) and isinstance(cons, Neq)
+    print("✓ Disequality parses on both sides of |-")
+
+    checker = EntailmentChecker()
+    assert checker.check_entailment("x != 5 |- x != 5").valid
+    # Transitivity needs the explicit disequality to be sound (x != z)
+    assert checker.check_entailment(
+        "ls(x, y) * ls(y, z) * x != z |- ls(x, z)").valid
+    assert not checker.check_entailment(
+        "ls(x, y) * ls(y, z) |- ls(x, z)").valid
+    print("✓ End-to-end entailments with != behave correctly")
+
+
 def run_tests(verbose=False):
     """Run all regression tests in this module"""
     if verbose:
@@ -291,6 +328,7 @@ def run_tests(verbose=False):
         test_or_formula_with_multiple_args,
         test_exists_with_multiple_vars,
         test_pto_with_constructor,
+        test_neq_operator_lexing,
     ]
 
     passed = 0

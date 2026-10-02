@@ -218,3 +218,7 @@ failure_analysis_results.json
 benchmarks/cache/
 /.benchmark_cache
 node_modules/
+
+# Scan output artifacts (velora scan -o / --guidance examples)
+findings.json
+results.sarif

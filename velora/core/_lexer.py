@@ -45,9 +45,9 @@ class Lexer:
         ('SEPCONJ', r'\*'),
         ('AND', r'&'),
         ('OR', r'\|'),
+        ('NEQ', r'!='),  # must precede NOT so '!=' is not lexed as '!' '='
         ('NOT', r'!'),
         ('EQ', r'==?'),
-        ('NEQ', r'!='),
         ('LPAREN', r'\('),
         ('RPAREN', r'\)'),
         ('LBRACKET', r'\['),

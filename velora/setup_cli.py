@@ -253,6 +253,6 @@ def cmd_setup(args) -> int:
               "the bridge)")
     else:
         print(f"    active model: {model} [{source}]")
-    print("    velora scan src/ --ai      # zero-key AI scan")
+    print("    velora scan . --ai         # zero-key AI scan (current folder)")
     print("    velora doctor              # re-check anytime")
     return 0

@@ -418,7 +418,7 @@ def start_bridge(args=None, launcher=None, prep=None) -> int:
     print(f"[bridge] started (pid {child.pid}): "
           f"http://127.0.0.1:{port}  log: {logfile_path()}")
     print("    velora models tui      # pick a model")
-    print("    velora scan src/ --ai  # use it")
+    print("    velora scan . --ai       # use it (current folder)")
     return 0
 
 
@@ -523,7 +523,7 @@ def cmd_serve_bridge(args) -> int:
         print(f"    export VELORA_LLM_BASE_URL={DEFAULT_BASE_URL}   "
               "# optional; `velora models tui` persists it instead")
         print("    velora models tui        # pick an opencode model (TTY)")
-        print("    velora scan src/ --ai    # run with the active model")
+        print("    velora scan . --ai       # run with the active model")
         if getattr(args, "configure", False):
             try:
                 _configure(f"http://127.0.0.1:{port}/v1",
