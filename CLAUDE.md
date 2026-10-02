@@ -24,11 +24,12 @@ python -m pytest tests/ -v
 python -m pytest tests/ --cov=velora --cov-report=term
 
 # Run specific test file
-python -m pytest tests/test_footprint_analysis.py
 python -m pytest tests/test_heap_graph_analysis.py
+python -m pytest tests/test_agent_transport.py
 
-# Run specific legacy suite (all SL-COMP tests, old test files)
-python -m pytest tests/test_legacy_suites.py -v
+# Run SL-COMP suites (one test file per division), or all of them by pattern
+python -m pytest tests/test_slcomp_qf_shls_entl.py -v
+python -m pytest tests/ -k "slcomp" -v
 
 # Run tests matching a pattern
 python -m pytest tests/ -k "footprint"
@@ -40,14 +41,15 @@ python -m pytest tests/ -q -W ignore::pytest.PytestCollectionWarning
 
 ### Benchmarking
 ```bash
-# Run SL-COMP benchmarks
-python benchmarks/run_slcomp.py
+# Download, then run the curated SMT benchmarks (SL-COMP / SMT-LIB)
+python -m benchmarks download --curated
+python -m benchmarks run --curated
 
-# Analyze failures
-python benchmarks/analyze_failures.py
+# Analyze results (add --failures for per-case detail)
+python -m benchmarks analyze
 
-# Visualize heap structures
-python benchmarks/visualize_heap.py
+# Visualize heap structures of an SMT2 file
+python -m benchmarks visualize path/to/file.smt2
 ```
 
 ### Development
@@ -165,7 +167,7 @@ velora/
 
 ### Key Design Decisions
 
-**Theoretical Foundation**: Velora implements separation logic (Reynolds & O'Hearn, 2002) using SMT-based reasoning with Z3. The core technique is the heap-as-array encoding (Piskac, Wies, Zufferey, 2013), which reduces separation logic entailments to first-order logic queries. See README.md "Theoretical Foundations" section for detailed references and comparison with other solvers (Sleek, Cyclist, Grasshopper, SPEN).
+**Theoretical Foundation**: Velora implements separation logic (Reynolds & O'Hearn, 2002) using SMT-based reasoning with Z3. The core technique is the heap-as-array encoding (Piskac, Wies, Zufferey, 2013), which reduces separation logic entailments to first-order logic queries. See README.md "The Symbolic Core: Separation Logic + Z3" section for detailed references and comparison with other solvers (Sleek, Cyclist, Grasshopper, SPEN).
 
 **Heap Representation**: Heap is a Z3 array `heap: Loc -> Val`. Domain is tracked as a set of locations. Disjointness enforced by ensuring domains don't overlap in separating conjunction.
 
@@ -175,17 +177,11 @@ velora/
 
 **Lemma Library**: Pattern-based lemma application (similar to Sleek's strategy) handles common entailments without Z3 queries. Proven lemmas for transitivity, reflexivity, and construction patterns.
 
-**Soundness**: All predicates validated for strict positivity (no negation), free variables properly bound, and arity consistency. Parser bug fixed in commit d239d01 - critical fix for storing body text correctly.
+**Soundness**: All predicates validated for strict positivity (no negation), free variables properly bound, and arity consistency.
 
 **Performance**: Fast paths for reflexivity (<1ms), syntactic checks before Z3. Average 5ms per check on test suite.
 
 ## Critical Implementation Notes
-
-### Parser Bug Fix (d239d01)
-The parser had a critical bug where it was storing the Formula object instead of the body text when parsing SMT2 predicates. This caused recursive predicate definitions to fail. Always store `body_text` as string, not Formula object.
-
-### Recursion Handling (2233a73)
-Predicates with deep recursion can hit Python's recursion limit. The checker now handles `RecursionError` gracefully by returning `unknown` instead of crashing. Consider increasing unfold depth carefully.
 
 ### PTO Syntax (3ba90de)
 The parser handles SMT2 syntax `(as nil Type)` in struct fields for points-to assertions. This is essential for SL-COMP benchmarks where nil values are typed.
@@ -231,6 +227,12 @@ Magic wand (`P -* Q`) is NOT commutative unlike other binary connectives. Handle
 ### Z3 Timeout
 Default timeout is 5000ms. Increase for complex benchmarks or decrease for faster feedback. Benchmarks use 10000ms timeout.
 
+### Exploit agent: transport & termination (`velora/sil/llm_agent.py`, `llm_exploit.py`, `llm_client.py`)
+- One agent round-trip may take up to `VELORA_LLM_AGENT_TIMEOUT` (default **300s**). The opencode bridge sends **no bytes until the turn finishes**, so the per-call socket gap must exceed the turn length: `chat_raw` passes `agent_timeout` for agentic calls (`VELORA_LLM_TIMEOUT` = 120s default covers plain chat).
+- An empty round-trip retries once at the step level (`no response from the model -- retrying`), then the run gives up with `reason=model unreachable after N failed attempts` (`AgentResult.fail`).
+- **Termination:** with `--success-check`, the shell oracle is authoritative (prints `[success-check] <evidence>`, overrides agent claims). Without it, a run stops only on a guarded final `VERIFIED: <evidence>` claim — it must be the *latest* assistant message **and** have a prior tool/assistant turn, so a first-turn echo of the goal never terminates a run (`_self_verified` in `llm_exploit.py`).
+- In bridge mode opencode runs the model's own tools (no OpenAI `tool_calls` in responses), so the loop prints `·` narration lines instead of `$ cmd` lines; velora's `exec_tool` never executes. Tests: `tests/test_agent_transport.py`.
+
 ## Testing Strategy
 
 **Test Organization**:
@@ -243,6 +245,7 @@ Default timeout is 5000ms. Increase for complex benchmarks or decrease for faste
 - `test_negative.py`: Invalid entailments (should fail)
 - `test_edge_cases.py`: Corner cases and error handling
 - `test_parser_regressions.py`: Parser bug regressions
+- `test_agent_transport.py`: Exploit agent transport retries, narration, VERIFIED self-termination
 
 **Test Pattern**:
 ```python
