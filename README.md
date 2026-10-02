@@ -9,9 +9,12 @@
 <h4 align="center">Sound static analysis + LLM agent in one loop — detect → exploit → fix · 5 languages · zero-key AI · separation logic + Z3</h4>
 
 <p align="center">
-  <a href="https://github.com/manojxshrestha/velora/actions/workflows/tests.yml"><img src="https://github.com/manojxshrestha/velora/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/SL--COMP-79.9%25-brightgreen" alt="SL-COMP 79.9%">
+  <img src="https://img.shields.io/badge/languages-5%20frontends-purple" alt="5 symbolic frontends">
+  <img src="https://img.shields.io/badge/zero--key%20AI-free%20tier-orange" alt="Zero-key AI free tier">
+  <img src="https://img.shields.io/badge/proved%20with-Z3-red" alt="Proved with Z3">
 </p>
 
 <p align="center">
@@ -63,7 +66,7 @@ Everything beyond the quick start lives in [`docs/`](docs/):
 | Guide | What's inside |
 |-------|---------------|
 | [Installation & Setup](docs/installation.md) | Requirements, install variants, zero-key AI setup, the bridge, environment variables, platform support |
-| [Usage & Commands](docs/usage.md) | Scan, the detect → exploit → fix loop, fix, black-box agent, solver, CI/CD, troubleshooting, full CLI reference |
+| [Usage & Commands](docs/usage.md) | Scan, the detect → exploit → fix loop, fix, black-box agent, bug-hunting guide, solver, CI/CD, troubleshooting, full CLI reference |
 | [Detection](docs/detection.md) | Supported languages, 80+ vulnerability detectors, how detection works |
 | [AI Layer & Models](docs/ai-models.md) | LLM detection & triage, RAM & model requirements, model providers (zero-key, Zen, local) |
 | [Python API & Symbolic Core](docs/api.md) | Embedding Velora in Python; the separation-logic + Z3 foundation |
@@ -92,10 +95,13 @@ velora scan /path/to/your/project --pattern "**/*.java"   # only its Java files
 **3 — Scan with AI.** `--ai` adds LLM detection + triage on top of the symbolic engine. One-time model setup first (zero-key, no API key needed):
 
 ```bash
-velora setup                                   # installs & starts the local model bridge
-velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt   # pick the free model
-velora scan . --ai
+velora setup                                   # one-time: install + start the local model bridge
+velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt   # activate the free model (no key)
+velora models tui                              # full-screen picker: opencode bridge + local servers
+velora scan . --ai                             # scan, now with the LLM layer on top
 ```
+
+Each command, plainly: **`velora setup`** bootstraps whatever is missing, user-local (Node, the opencode CLI, bridge dependencies) and starts the bridge daemon. **`velora models use <ref>`** activates a model by name, non-interactively. **`velora models tui`** is the interactive, beginner-friendly alternative — a full-screen picker that lists every model Velora can reach: the zero-key opencode bridge (free Zen tier) **and** any local server (Ollama, LM Studio, llama.cpp, vLLM). It probes each source live, auto-starts the bridge if it isn't running, and saves your pick — still without ever storing an API key.
 
 **4 — Built-in separation-logic solver.** Velora's soundness core, exposed directly — ask whether one heap description implies another, e.g. “two joined list segments (whose ends differ) imply one whole list”:
 

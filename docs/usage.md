@@ -32,13 +32,16 @@ velora scan . --pattern "**/*.java"        # only .java files (a project that ha
 velora scan . --pattern "**/*.py" -f json -o findings.json
 
 # 4. Add the AI layer (LLM detection + triage) -- one-time model setup first:
-velora setup                               # zero-key quickstart, see Model Providers
-velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt
+velora setup                               # install + start the zero-key model bridge
+velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt   # activate the free model
+velora models tui                          # full-screen picker: opencode bridge + local servers
 velora scan . --ai
 
 # 5. CI gate: fail the build on high+ findings (SARIF for code-scanning UIs)
 velora scan . --format sarif -o results.sarif --fail-on high
 ```
+
+New to model setup? **`velora models tui`** is the easy route: a full-screen picker that lists every model Velora can reach — the zero-key opencode bridge (free Zen tier) **plus** any local server (Ollama, LM Studio, llama.cpp, vLLM) — probes each source live, auto-starts the bridge if it isn't running, and saves your pick without ever storing an API key. `velora models use <ref>` does the same thing non-interactively (for scripts).
 
 Symbolic scans (no `--ai`) finish in milliseconds to seconds and never need a model. Each `--ai` file costs one or more LLM calls — seconds on a fast endpoint, tens of seconds on the free tier.
 
@@ -166,6 +169,50 @@ Practical notes:
 - **Model quality matters most here:** detection tolerates small models, exploitation does not — free-tier Zen works for triage, but use the strongest model you have (`velora models use zen/glm-5.2`, or a capable local model) for the exploit loop.
 - **No model?** The symbolic pipeline (`scan` without `--ai`, `solve`) never needs one — only `exploit` and `--ai` do.
 
+### Bug hunting guide (worked example: `example.com`)
+
+A compact black-box campaign you can copy, one hypothesis at a time.
+
+**Authorization first.** Only test targets you own or are explicitly in scope for. `example.com` is IANA's reserved *documentation* domain — treat it purely as a placeholder below and swap in your authorized target (your own app, `python examples/practice_target.py` for a local one, or a bug-bounty program's listed scope).
+
+**Step 1 — Recon run (unguided).** Let the agent map the surface and attack a stated goal. Exit 0 = verified win; exit 1 = iterate on the goal wording:
+
+```bash
+velora exploit --target https://example.com \
+  --goal 'map the application surface (pages, forms, parameters) and probe them for one high-confidence flaw' \
+  --max-steps 20
+```
+
+**Step 2 — Focused goals, one at a time.** Each run is exactly one hypothesis; specific wording gets specific results. The agent executes real commands (curl, python, sqlmap, … — installing tools if missing) and narrates every step:
+
+```bash
+velora exploit --target https://example.com \
+  --goal 'test every search/query parameter for SQL injection' --max-steps 40
+
+velora exploit --target https://example.com \
+  --goal 'check whether login reveals which usernames are valid (user enumeration)' --max-steps 30
+
+velora exploit --target https://example.com \
+  --goal 'look for IDOR: change numeric ids on resource endpoints and see if other records are returned' --max-steps 40
+```
+
+**Step 3 — Pin "success" with an oracle.** Your command is re-run after every step; exit 0 means solved, and it overrides any stale agent claim:
+
+```bash
+velora exploit --target https://example.com \
+  --goal 'access a protected page without logging in' \
+  --success-check 'curl -sk https://example.com/private | grep -qi "secret"'
+```
+
+**Step 4 — Keep the evidence.** The full trace (system prompt, every command + response) plus machine-readable output goes into your report:
+
+```bash
+velora exploit --target https://example.com --goal '…' \
+  --trace-out trace.json --format json > report.json
+```
+
+**Loop:** feed each success back into the next goal's wording, and stop when the step budget stops paying off. If you ever get the source, add `--guidance findings.json` from a `velora scan` (grey-box) and the same runs converge far faster. Flags and budgets: [Black-box testing a live target](#black-box-testing-a-live-target-no-source) above.
+
 ### Separation-logic solver
 
 Velora's soundness core, exposed directly — pure Z3, no model, no setup:
@@ -230,7 +277,7 @@ Velora is one CLI covering the whole workflow (detect, triage, exploit, fix) plu
 | `velora check <file>` | Batch-check entailments (one per line). |
 | `velora parse "<formula>"` | Parse and display a formula's AST. |
 | `velora repl` | Interactive separation-logic REPL. |
-| `velora models` | Browse & switch AI models for `--ai`. `list` (`--free`, `--registry`, `--query`), `tui` (full-screen picker), `use <ref>`, `current`, `providers`, `import-opencode`. |
+| `velora models` | Browse & switch AI models for `--ai`. `list` (`--free`, `--registry`, `--query`), `tui` (full-screen picker: opencode bridge + local servers, probes and auto-starts the bridge), `use <ref>`, `current`, `providers`, `import-opencode`. |
 | `velora doctor` | Diagnose the zero-key AI setup; exit 1 when not ready. `--probe` sends a live keyless chat, `--format json`. |
 | `velora setup` | One-time bootstrap: install missing prerequisites user-local (no sudo), seed and start the bridge. `--yes` for non-interactive. |
 | `velora serve-bridge` | Local OpenAI-compatible bridge to opencode (zero-key `--ai`). `--start` / `--stop` / `--status` manage the daemon on port 8399. |
