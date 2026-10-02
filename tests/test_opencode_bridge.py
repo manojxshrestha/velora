@@ -80,6 +80,15 @@ class TestServeBridgeCLI:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(shutil, "which",
                             lambda name: "/mnt/c/Program Files/nodejs/node.exe")
+        # find_node also falls back to hardcoded system paths
+        # (/usr/local/bin/node, ...). Hide them so the assertion does not
+        # depend on the machine -- CI images ship a node there.
+        hardcoded = {"/opt/homebrew/bin/node", "/usr/local/bin/node",
+                     "/usr/bin/node", "/opt/node/bin/node"}
+        real_is_file = Path.is_file
+        monkeypatch.setattr(
+            Path, "is_file",
+            lambda self: str(self) not in hardcoded and real_is_file(self))
         assert bridge_cli.find_node() is None
 
     def test_find_opencode_skips_exe(self, monkeypatch, tmp_path):
