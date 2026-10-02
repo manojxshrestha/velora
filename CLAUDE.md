@@ -183,9 +183,6 @@ velora/
 
 ## Critical Implementation Notes
 
-### PTO Syntax (3ba90de)
-The parser handles SMT2 syntax `(as nil Type)` in struct fields for points-to assertions. This is essential for SL-COMP benchmarks where nil values are typed.
-
 ### Wand Implementation
 Magic wand (`P -* Q`) is NOT commutative unlike other binary connectives. Handle carefully in syntactic equality checks and encoding.
 
