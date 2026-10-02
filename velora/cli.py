@@ -160,7 +160,8 @@ def create_parser() -> argparse.ArgumentParser:
     exploit_parser.add_argument(
         "--success-check",
         help="Shell command re-run after each step; exit 0 means solved (success "
-             "oracle). Omit to let the agent self-terminate when it verifies success."
+             "oracle). Omit to let the agent self-terminate on its guarded "
+             "`VERIFIED: <evidence>` claim instead."
     )
     exploit_parser.add_argument(
         "--max-steps", type=int, default=40,
@@ -589,15 +590,22 @@ def cmd_exploit(args) -> int:
                          "output.")
     task_prompt = f"Target: {args.target}\n\nObjective: {goal}"
 
-    # Success oracle: optional shell command, exit 0 == solved.
+    # Success oracle: optional shell command, exit 0 == solved. Output is captured
+    # (a bare `curl` would otherwise spew its body mid-log) and shown as evidence
+    # when it passes -- that observed state change is what "solved" means.
     is_solved = None
     if args.success_check:
         def is_solved() -> bool:
             try:
-                return subprocess.run(args.success_check, shell=True,
-                                      timeout=60).returncode == 0
+                proc = subprocess.run(args.success_check, shell=True, timeout=60,
+                                      capture_output=True, text=True, errors="replace")
             except Exception:
                 return False
+            if proc.returncode == 0 and args.format == "text":
+                evidence = " ".join(((proc.stdout or "") + (proc.stderr or "")).split())
+                if evidence:
+                    print(f"[success-check] {evidence[:120]}", flush=True)
+            return proc.returncode == 0
 
     exec_tool = local_exec_tool(timeout=args.exec_timeout)
     result = exploit_agentic(task_prompt, config, exec_tool=exec_tool,

@@ -21,12 +21,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 DEFAULT_STALL = ("Do not stop or summarize. Take the next concrete step now by "
                  "calling a tool with a real command/query.")
 DEFAULT_FINAL = "Provide your final answer now as the JSON object."
+
+# Consecutive transport failures tolerated per step before the loop gives up.
+# Each step already retries inside chat_raw (agent_retries+1 HTTP attempts with
+# backoff), so this is the step-level budget on top: one retry, then stop --
+# a dead endpoint fails in minutes instead of silently burning the whole step
+# budget with "no response" nudges.
+MAX_TRANSPORT_FAILURES = 2
 
 
 @dataclass
@@ -35,6 +43,7 @@ class AgentResult:
     done: bool                  # terminated on a real result vs budget/transport failure
     steps: int
     transcript: List[Dict[str, Any]] = field(default_factory=list)
+    fail: Optional[str] = None  # set when the loop stopped on a failure (not the budget)
 
 
 # ---- Shared repo-investigation tools (detect + triage) -------------------------
@@ -186,6 +195,8 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
     silent. Returns an AgentResult.
     """
     step = 0
+    transport_failures = 0
+    fail: Optional[str] = None
     for step in range(1, max_steps + 1):
         # Oracle-driven agents: did the previous action achieve the objective?
         if check_done is not None:
@@ -194,22 +205,33 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
                 return AgentResult(r, True, step - 1, messages)
 
         if compact_at_chars and _context_chars(messages) > compact_at_chars:
-            messages = _compact_messages(messages, client, keep_recent)
+            # in place: callers (and check_done closures) hold this same list
+            messages[:] = _compact_messages(messages, client, keep_recent)
 
         if progress:
             print(f"[{progress_label}] step {step}/{max_steps}: thinking...",
                   flush=True)
         msg = client.chat_raw(messages, tools)
         if msg is None:
-            # Transport hiccup. Self-terminating agents stop with an empty result;
-            # oracle-driven agents keep trying.
-            if finalize is not None:
-                return AgentResult(finalize(""), False, step, messages)
+            # Transport failure (chat_raw already retried the HTTP call). Give the
+            # step one more try, then stop -- retrying forever would silently eat
+            # the whole budget on a dead endpoint.
+            transport_failures += 1
+            if transport_failures < MAX_TRANSPORT_FAILURES:
+                if progress:
+                    print(f"[{progress_label}] no response from the model -- "
+                          f"retrying (attempt {transport_failures + 1}/"
+                          f"{MAX_TRANSPORT_FAILURES})", flush=True)
+                time.sleep(2 * transport_failures)
+                continue                       # same message again: pure transport retry
+            fail = f"model unreachable after {transport_failures} failed attempts"
             if progress:
-                print(f"[{progress_label}] no response from the model -- retrying",
+                print(f"[{progress_label}] no response from the model -- giving up",
                       flush=True)
-            messages.append({"role": "user", "content": "(no response) Continue: call a tool now."})
-            continue
+            if finalize is not None:
+                return AgentResult(finalize(""), False, step, messages, fail=fail)
+            break                              # oracle path: tail runs check_done once more
+        transport_failures = 0
 
         tool_calls = msg.get("tool_calls") or []
         messages.append({"role": "assistant", "content": msg.get("content") or "",
@@ -233,17 +255,23 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
                                  "content": (out or "")[:max_tool_output]})
             continue
 
-        # No tool call.
+        # No tool call. Show what the model said so bridge-style endpoints (which
+        # run tools themselves and answer in prose) are never a blank screen.
+        if progress:
+            text = " ".join((msg.get("content") or "").split())
+            if text:
+                print(f"[{progress_label}] · {text[:160]}", flush=True)
         if finalize is not None:
             return AgentResult(finalize(msg.get("content") or ""), True, step, messages)
         # Oracle-driven agent narrated without acting -> push a concrete step
         # (the oracle is re-checked at the top of the next iteration).
         messages.append({"role": "user", "content": stall_nudge})
 
-    # Budget exhausted.
+    # Budget exhausted (or the transport give-up path broke out above).
     if finalize is not None:
         messages.append({"role": "user", "content": final_nudge})
         msg = client.chat_raw(messages)
-        return AgentResult(finalize((msg or {}).get("content") or ""), True, step, messages)
+        return AgentResult(finalize((msg or {}).get("content") or ""), True, step,
+                           messages, fail=fail)
     r = check_done() if check_done is not None else None
-    return AgentResult(r, r is not None, step, messages)
+    return AgentResult(r, r is not None, step, messages, fail=fail)

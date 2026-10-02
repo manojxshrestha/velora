@@ -66,7 +66,8 @@ class LLMConfig:
     cache_path: str = ""            # persist verdicts here (JSON); reused across runs
     repo_root: str = ""             # repo root for agentic tools (read_file/grep)
     max_tool_steps: int = 30        # investigation rounds for agentic detect/triage (room to enumerate handlers/sinks across files)
-    timeout: int = 60               # socket timeout: max gap between bytes / connect
+    timeout: int = 120              # socket timeout: max gap between bytes / connect (a
+                                    # non-streamed generation counts as one long gap)
     # Hard wall-clock deadline for a single HTTP call. urllib's `timeout` only bounds
     # per-socket-operation gaps, so a reasoning model that trickles bytes can block
     # far past it; this watchdog force-closes the socket at the deadline. 0 -> derive
@@ -77,6 +78,14 @@ class LLMConfig:
     drop_threshold: float = 0.75    # triage drops only false-positives at/above this confidence
     exploit_max_steps: int = 250    # exploitation: tool-loop turns against a live target (compaction keeps long runs in-context)
     triage_agentic: bool = False    # triage: escalate uncertain verdicts to an investigation loop
+    # Socket budget for AGENTIC calls (chat_raw: the detect/triage/exploit tool
+    # loops). These read back a whole non-streamed model turn; through the opencode
+    # bridge that turn may itself run a tool loop for minutes and NO bytes arrive
+    # until it finishes, so the read looks like a stall for the turn's full duration.
+    # The old 60s cut off free-tier turns mid-generation (the "no response from the
+    # model" retries); 300s covers the documented 30-90s turns with real headroom.
+    # Env: VELORA_LLM_AGENT_TIMEOUT.
+    agent_timeout: int = 300
     enabled: bool = False
 
     @classmethod
@@ -122,7 +131,8 @@ class LLMConfig:
             max_context_chars=int(os.environ.get("VELORA_LLM_MAX_CONTEXT_CHARS", os.environ.get("FRAME_LLM_MAX_CONTEXT_CHARS", "6000"))),
             json_mode=os.environ.get("VELORA_LLM_JSON_MODE", os.environ.get("FRAME_LLM_JSON_MODE", "json_schema")),
             drop_threshold=float(os.environ.get("VELORA_LLM_DROP_THRESHOLD", os.environ.get("FRAME_LLM_DROP_THRESHOLD", "0.75"))),
-            timeout=int(os.environ.get("VELORA_LLM_TIMEOUT", os.environ.get("FRAME_LLM_TIMEOUT", "60"))),
+            timeout=int(os.environ.get("VELORA_LLM_TIMEOUT", os.environ.get("FRAME_LLM_TIMEOUT", "120"))),
+            agent_timeout=int(os.environ.get("VELORA_LLM_AGENT_TIMEOUT", os.environ.get("FRAME_LLM_AGENT_TIMEOUT", "300"))),
             total_timeout=int(os.environ.get("VELORA_LLM_TOTAL_TIMEOUT", os.environ.get("FRAME_LLM_TOTAL_TIMEOUT", "0"))),
             enabled=bool(base and model),
         )
@@ -214,16 +224,19 @@ class LLMClient:
                 raise
         raise last_err if last_err is not None else RuntimeError("no response_format attempt ran")
 
-    def _effective_total_timeout(self) -> float:
+    def _effective_total_timeout(self, sock_timeout: Optional[int] = None) -> float:
         """Wall-clock deadline for one HTTP call. Defaults generously off the socket
         timeout so a legitimately slow reasoning generation still completes, while a
-        genuinely hung connection is bounded."""
+        genuinely hung connection is bounded. `sock_timeout` is the per-call socket
+        gap the deadline should pair with (agentic calls pass a larger one)."""
         tt = getattr(self.config, "total_timeout", 0) or 0
         if tt > 0:
             return float(tt)
-        return float(max(self.config.timeout * 6, 600))
+        st = self.config.timeout if not sock_timeout else sock_timeout
+        return float(max(st * 2, 600))
 
-    def _urlopen_read(self, req: "urllib.request.Request") -> bytes:
+    def _urlopen_read(self, req: "urllib.request.Request",
+                      sock_timeout: Optional[int] = None) -> bytes:
         """urlopen + read with a hard wall-clock deadline enforced by the CALLER.
 
         The request runs in a daemon worker; the caller waits at most `deadline`
@@ -232,15 +245,18 @@ class LLMClient:
         inside urlopen before replying -- can otherwise hang far past it. When the
         deadline hits we close the socket (if we hold it, to unblock a stuck read)
         and raise, so the caller proceeds even if the abandoned worker lingers until
-        its socket timeout.
+        its socket timeout. `sock_timeout` overrides the socket gap for this call
+        (agentic calls pass the larger `agent_timeout`: a non-streamed model turn
+        arrives as one long gap).
         """
-        deadline = self._effective_total_timeout()
+        st = self.config.timeout if not sock_timeout else sock_timeout
+        deadline = self._effective_total_timeout(st)
         box: Dict[str, Any] = {}
         done = threading.Event()
 
         def _worker():
             try:
-                resp = urllib.request.urlopen(req, timeout=self.config.timeout)
+                resp = urllib.request.urlopen(req, timeout=st)
                 box["resp"] = resp
                 box["raw"] = resp.read()
             except Exception as exc:      # surfaced to the caller below
@@ -349,7 +365,9 @@ class LLMClient:
             try:
                 self.stats["calls"] += 1
                 req = urllib.request.Request(url, data=data, headers=headers)
-                out = json.loads(self._urlopen_read(req).decode("utf-8"))
+                out = json.loads(self._urlopen_read(
+                    req, sock_timeout=getattr(self.config, "agent_timeout", 0)
+                    or None).decode("utf-8"))
                 return out["choices"][0]["message"]
             except (urllib.error.URLError, KeyError, ValueError, TimeoutError, OSError):
                 self.stats["errors"] += 1
