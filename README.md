@@ -119,6 +119,8 @@ velora scan . --ai                             # scan, now with the LLM layer on
 
 Each command, plainly: **`velora setup`** bootstraps whatever is missing, user-local (Node, the opencode CLI, bridge dependencies) and starts the bridge daemon. **`velora models use <ref>`** activates a model by name, non-interactively. **`velora models tui`** is the interactive, beginner-friendly alternative — a full-screen picker that lists every model Velora can reach: the zero-key opencode bridge (free Zen tier) **and** any local server (Ollama, LM Studio, llama.cpp, vLLM). It probes each source live, auto-starts the bridge if it isn't running, and saves your pick — still without ever storing an API key.
 
+If a later `--ai` or `exploit` run ever fails with `no response from the model`, the bridge daemon has simply stopped (reboot, crash, or idle). Two commands restore and verify it: `velora serve-bridge --start`, then `velora doctor --probe` (exit 0 = working).
+
 **4 — Exploit and fix.** Findings drive the rest of the loop — a JSON file is the hand-off between stages. `exploit` needs a **live, authorized** target (a URL); `fix` patches the source and re-scans to prove each fix landed:
 
 ```bash

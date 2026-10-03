@@ -415,6 +415,13 @@ velora models current           # which model is active
 velora models use zen/glm-5.2   # switch to a stronger hosted model (needs its key)
 ```
 
+**If the model stops responding** — a run fails with `no response from the model` or `reason=model unreachable after N failed attempts` — the bridge daemon has stopped (it can die on reboot, crash, or idle). Two commands restore and verify the chain:
+
+```bash
+velora serve-bridge --start     # restart the bridge daemon
+velora doctor --probe           # verify: one real test chat (exit 0 = working)
+```
+
 Use these when `--ai` complains that no endpoint/model is configured, or when `velora doctor` exits 1 — the troubleshooting table has the exact fix for each symptom. The symbolic-only workflow never touches any of this.
 
 Other model facts worth knowing:
