@@ -164,3 +164,44 @@ def test_progress_prints_narration_for_bridge_style_endpoints(capsys):
               check_done=lambda: None, progress=True, progress_label="exploit")
     out = capsys.readouterr().out
     assert "[exploit] · Recon: nginx/1.24, /admin returns 403" in out
+
+
+# --- live output: budget banner + narration alongside tool calls ----------------
+
+def test_budget_suffix_reports_real_deadline_and_attempts():
+    from velora.sil.llm_agent import _budget_suffix
+    from velora.sil.llm_client import LLMClient
+
+    c = LLMClient(LLMConfig(base_url="http://127.0.0.1:9/v1", model="m",
+                             agent_timeout=300, agent_retries=2))
+    assert _budget_suffix(c) == " (deadline 600s/attempt, 3 attempts)"
+    # fake/custom clients without the transport surface get no suffix
+    assert _budget_suffix(_FlakyClient(fails=0)) == ""
+
+
+def test_step_banner_carries_transport_budget(capsys):
+    """The step banner must tell the operator the real per-step budget."""
+    from velora.sil.llm_client import LLMClient
+
+    c = _FlakyClient(fails=0, script=[_tool_call("curl t")])
+    real = LLMClient(LLMConfig(base_url="http://127.0.0.1:9/v1", model="m",
+                                agent_timeout=300, agent_retries=2))
+    real.chat_raw = c.chat_raw          # budget from the real transport, calls scripted
+    run_agent([SYS], real, tools=[], exec_tool=lambda n, a: "x", max_steps=1,
+              check_done=lambda: None, progress=True, progress_label="exploit")
+    out = capsys.readouterr().out
+    assert "step 1/1: thinking... (deadline 600s/attempt, 3 attempts)" in out
+
+
+def test_narration_prints_alongside_tool_calls(capsys):
+    """Bridge-style turns that narrate AND call tools must show both live —
+    narration was previously held back until the turn ended."""
+    c = _exploit_client([{"content": "Recon: /admin is 403, probing login",
+                          "tool_calls": [{"id": "1", "function": {
+                              "name": "run",
+                              "arguments": json.dumps({"cmd": "curl -s target/login"})}}]}])
+    run_agent([SYS], c, tools=[], exec_tool=lambda n, a: "ran", max_steps=1,
+              check_done=lambda: None, progress=True, progress_label="exploit")
+    out = capsys.readouterr().out
+    assert "[exploit] · Recon: /admin is 403, probing login" in out
+    assert "[exploit] $ curl -s target/login" in out

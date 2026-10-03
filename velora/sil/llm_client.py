@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -26,6 +27,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 _log = logging.getLogger("velora.llm")
+
+# Live-output heartbeat: while a request waits for the model, print an elapsed/
+# deadline line every _HEARTBEAT_INTERVAL seconds (first at _HEARTBEAT_AFTER), so
+# a slow turn is visibly slow instead of a frozen terminal. Overridable for tests.
+_HEARTBEAT_INTERVAL = 30.0
+_HEARTBEAT_AFTER = 30.0
 
 
 class LLMUnavailableError(RuntimeError):
@@ -265,7 +272,24 @@ class LLMClient:
                 done.set()
 
         threading.Thread(target=_worker, daemon=True).start()
-        if not done.wait(deadline):
+        # Wait with a heartbeat: an agentic turn through the opencode bridge sends
+        # no bytes until it finishes, so without periodic elapsed/deadline lines
+        # a legitimately working (or genuinely hung) call looks identical.
+        start = time.monotonic()
+        timed_out = False
+        while True:
+            remaining = deadline - (time.monotonic() - start)
+            if remaining <= 0:
+                timed_out = not done.is_set()
+                break
+            if done.wait(min(_HEARTBEAT_INTERVAL, remaining)):
+                break
+            elapsed = time.monotonic() - start
+            if elapsed >= _HEARTBEAT_AFTER:
+                print(f"[llm] · still waiting… {elapsed:.0f}s/{deadline:g}s "
+                      f"(model turn in progress; times out at the deadline)",
+                      file=sys.stderr, flush=True)
+        if timed_out:
             r = box.get("resp")
             if r is not None:
                 try:
@@ -369,9 +393,15 @@ class LLMClient:
                     req, sock_timeout=getattr(self.config, "agent_timeout", 0)
                     or None).decode("utf-8"))
                 return out["choices"][0]["message"]
-            except (urllib.error.URLError, KeyError, ValueError, TimeoutError, OSError):
+            except (urllib.error.URLError, KeyError, ValueError, TimeoutError, OSError) as exc:
                 self.stats["errors"] += 1
                 if i + 1 < attempts:      # transient blip -> back off and retry
+                    print(f"[llm] transport attempt {i + 1}/{attempts} failed "
+                          f"({type(exc).__name__}) -- retrying",
+                          file=sys.stderr, flush=True)
                     time.sleep(1.5 * (i + 1))
                     continue
+                print(f"[llm] transport failed after {attempts} attempt(s) "
+                      f"({type(exc).__name__}) -- giving up",
+                      file=sys.stderr, flush=True)
                 return None

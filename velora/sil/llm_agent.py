@@ -37,6 +37,23 @@ DEFAULT_FINAL = "Provide your final answer now as the JSON object."
 MAX_TRANSPORT_FAILURES = 2
 
 
+def _budget_suffix(client) -> str:
+    """Surface the transport budget on the step banner: the wall-clock deadline
+    per HTTP attempt and how many attempts chat_raw will make before the step
+    hands back None. Best-effort — returns '' for fake/custom clients so tests
+    and non-LLMClient transports are unaffected."""
+    try:
+        cfg = getattr(client, "config", None)
+        if cfg is None or not hasattr(client, "_effective_total_timeout"):
+            return ""
+        gap = getattr(cfg, "agent_timeout", 0) or getattr(cfg, "timeout", 0)
+        deadline = float(client._effective_total_timeout(gap))
+        attempts = max(1, getattr(cfg, "agent_retries", 2) + 1)
+        return f" (deadline {deadline:.0f}s/attempt, {attempts} attempts)"
+    except Exception:
+        return ""
+
+
 @dataclass
 class AgentResult:
     result: Any                 # whatever finalize/check_done produced
@@ -209,8 +226,8 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
             messages[:] = _compact_messages(messages, client, keep_recent)
 
         if progress:
-            print(f"[{progress_label}] step {step}/{max_steps}: thinking...",
-                  flush=True)
+            print(f"[{progress_label}] step {step}/{max_steps}: thinking..."
+                  f"{_budget_suffix(client)}", flush=True)
         msg = client.chat_raw(messages, tools)
         if msg is None:
             # Transport failure (chat_raw already retried the HTTP call). Give the
@@ -238,6 +255,13 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
                          **({"tool_calls": tool_calls} if tool_calls else {})})
 
         if tool_calls:
+            # Live visibility: show whatever the model narrated alongside its
+            # tool calls too (bridge-mode models explain, then act) -- never
+            # hold output back until the turn's end.
+            if progress:
+                text = " ".join((msg.get("content") or "").split())
+                if text:
+                    print(f"[{progress_label}] · {text[:160]}", flush=True)
             for tc in tool_calls:
                 fn = tc.get("function", {}) or {}
                 try:
