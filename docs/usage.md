@@ -540,36 +540,72 @@ Why these two pieces:
 
 ## Command pack: black-box, white-box & enterprise
 
-Ready-to-copy-paste commands for the three engagement modes. Targets are `https://www.hackthissite.org/` (a consent-based CTF/wargame — its own site calls it "a free, safe and legal training ground for hackers"), the bundled practice target at `127.0.0.1:8080`, and `<scope>` placeholders. `# PROPOSED:` marks a flag the mission needs that the CLI does not have yet — those rows document the gap, they do not run today.
+Ready-to-copy-paste commands for the three engagement modes — 20 commands, each with a one-line comment above it. Targets are `https://www.hackthissite.org/` (a consent-based CTF/wargame — its own site calls it "a free, safe and legal training ground for hackers"), the bundled practice target at `127.0.0.1:8080`, and `scope.txt` placeholders. `# PROPOSED:` marks a command/flag the mission needs that the CLI does not have yet — those rows document the gap, they do not run today.
 
 ```bash
 # --- Setup (any mode): zero-key model via the local opencode bridge ---
-velora setup                                                        # bootstrap Node + opencode + bridge, start the daemon
-velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt   # activate a free Zen model (no API key)
-velora doctor --probe                                               # live round-trip test: model + bridge are actually working
+# bootstrap Node + opencode + the bridge, and start the daemon
+velora setup
+
+# activate a free Zen model through the bridge (no API key needed)
+velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt
+
+# verify model + bridge with one live round-trip (exit 0 = healthy)
+velora doctor --probe
 
 # --- Black-box: live URL only, no source ---
+# AI detection over any pulled-down artifacts (JS bundles, downloaded pages)
+velora scan ./hts-artifacts --ai -f json -o findings.json
+
+# agent solves an HTS mission against the live consent-based target
 velora exploit --target https://www.hackthissite.org/ --goal 'solve an HTS basic mission and document the vulnerability' --max-steps 40
+
+# local practice target with an external success oracle (never faked by the model)
 velora exploit --target http://127.0.0.1:8080 --goal 'steal the flag from /admin and POST it to /report' --success-check 'curl -sf http://127.0.0.1:8080/pwned' --max-steps 30
+
+# keep machine-readable output + the full command/response transcript as evidence
 velora exploit --target https://www.hackthissite.org/ --goal 'enumerate the login form and test for SQL injection' --format json --trace-out evidence.json
-velora exploit --target https://www.hackthissite.org/ --goal 'test the upload feature for webshell delivery' --proxy http://127.0.0.1:8080 --header 'X-Bounty: program-slug'   # PROPOSED: --proxy/--header not implemented yet
-velora exploit --target https://www.hackthissite.org/ --scope scope.txt --goal 'only touch paths under /challenges'   # PROPOSED: scope gate — non-loopback targets should require it
-velora recon --target https://www.hackthissite.org/ --scope scope.txt -f json -o endpoints.json                     # PROPOSED: recon feeding exploit --guidance (black-box has no source scan)
+
+# PROPOSED: retest previously-fixed findings after a patch lands (command not implemented yet)
+velora retest --guidance findings.json --target https://www.hackthissite.org/
+
+# PROPOSED: route through Burp and send a program-identifying header (flags not implemented yet)
+velora exploit --target https://www.hackthissite.org/ --goal 'test the upload feature for webshell delivery' --proxy http://127.0.0.1:8080 --header 'X-Bounty: program-slug'
 
 # --- White-box: source in hand, proofs + patching ---
-velora scan ./src -f json -o findings.json --fail-on high             # scan once; findings.json drives exploit and fix
-velora scan ./src --ai -f json -o findings.json                       # add LLM detection + triage on top of the symbolic engine
+# scan once; findings.json then drives exploit and fix
+velora scan ./src -f json -o findings.json --fail-on high
+
+# add LLM detection + triage on top of the symbolic engine
+velora scan ./src --ai -f json -o findings.json
+
+# pipe the scan straight into the agent (guidance from stdin)
 velora scan ./src -f json | velora exploit --guidance - --target http://127.0.0.1:8080 --goal 'exploit the findings from the scan'
-velora fix ./src --guidance findings.json --diff                      # preview model-generated patches as a unified diff
-velora fix ./src --guidance findings.json --in-place                  # apply patches, then re-scan each one to verify
-velora check entailments.txt --format json --stop-on-failure          # batch-prove a file of entailments, one per line
-velora solve 'x |-> 5 * y |-> 3 |- x |-> 5' --timeout 10000           # one entailment with a raised solver budget
-velora parse 'ls(x, y) * y |-> z |- ls(x, z)' --format json           # inspect how a formula tokenizes/parses
+
+# preview model-generated patches as a unified diff
+velora fix ./src --guidance findings.json --diff
+
+# apply patches, then re-scan each one to verify the fix landed
+velora fix ./src --guidance findings.json --in-place
+
+# batch-prove a file of entailments (one per line), machine-readable, stop at first failure
+velora check entailments.txt --format json --stop-on-failure
+
+# one entailment with a raised solver budget
+velora solve 'x |-> 5 * y |-> 3 |- x |-> 5' --timeout 10000
+
+# interactive parser/repl loop for formulas (tokenize, parse, ask in a loop)
+velora repl
 
 # --- Enterprise: CI gates, fleets, authenticated scale ---
-velora scan ./src --fail-on critical -f sarif -o report.sarif         # CI gate: exit 1 on criticals, SARIF for the Security tab
-velora serve-bridge --start                                           # fleet: daemonize the bridge once per machine, then doctor --probe
-velora scan ./src --ai --proxy http://proxy.corp:3128 --scope corp-scope.txt --insecure -f json --fail-on high   # PROPOSED: corporate egress proxy + scope + lab TLS
+# CI gate: exit 1 on criticals, SARIF decorates PRs in GitHub's Security tab
+velora scan ./src --fail-on critical -f sarif -o report.sarif
+
+# fleet setup: daemonize the bridge once per machine, then run doctor --probe
+velora serve-bridge --start
+
+# PROPOSED: authenticated enterprise run - scope file + login flow (flags not implemented yet)
+velora exploit --target https://app.corp.example --scope corp-scope.txt --login-url https://app.corp.example/login --login-user svc --login-pass-env CORP_PASS --goal 'reach the admin dashboard'
 ```
 
 - **`--success-check`** is the authoritative oracle: it is re-run after every step and decides success, so a model claim can never fake an exit code 0.
