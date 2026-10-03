@@ -10,7 +10,7 @@ scan → exploit → fix → scan again
 
 You scan local source for vulnerabilities, take the findings to a live authorized target, patch the code, and re-scan to prove each fix. Everything below is copy-pasteable, and every command explains what it produces and where that output goes next. Run `velora <command> --help` for the complete flag list of any command.
 
-**Contents** — [Quick Start](#quick-start) · [Scan](#scan) · [Exploit](#exploit) · [Fix](#fix) · [AI & Model Setup](#ai--model-setup) · [Separation Logic](#separation-logic) · [CI/CD](#cicd) · [Commands Reference](#commands-reference) · [Troubleshooting](#troubleshooting)
+**Contents** — [Quick Start](#quick-start) · [Scan](#scan) · [Exploit](#exploit) · [Fix](#fix) · [AI & Model Setup](#ai--model-setup) · [Separation Logic](#separation-logic) · [CI/CD](#cicd) · [Command pack](#command-pack-black-box-white-box--enterprise) · [Commands Reference](#commands-reference) · [Troubleshooting](#troubleshooting)
 
 ## Quick Start
 
@@ -241,7 +241,7 @@ velora exploit --target https://target.com --goal 'read /etc/passwd via the file
 
 ### Timing, budgets, and grey-box
 
-**Timing:** each step is one LLM round-trip — 30–90 s on the free tier, with a per-step ceiling of 5 minutes (`VELORA_LLM_AGENT_TIMEOUT`); a dropped connection retries once before the run gives up with `reason=model unreachable after N failed attempts`. A full 40-step run therefore takes roughly 15–60 minutes. A faster/stronger model (`velora models use zen/glm-5.2`) cuts this dramatically; so does a smaller `--max-steps`. `Ctrl+C` stops cleanly at any point. When pasting multi-line commands, keep each line-ending `\` as the very last character (no trailing spaces) or join them into one line.
+**Timing:** each step is one LLM round-trip — 30–90 s on the free tier. The step banner shows the real budget (`thinking... (deadline 600s/attempt, 3 attempts)`): the wall-clock deadline per HTTP attempt is `max(VELORA_LLM_AGENT_TIMEOUT × 2, 600)` seconds (socket gap `VELORA_LLM_AGENT_TIMEOUT` = 300 s by default; pin the deadline itself with `VELORA_LLM_TOTAL_TIMEOUT`), and `chat_raw` makes up to 3 attempts before the step hands back `None` — one step-level retry follows, so a single dead step can take ≈30 min before `reason=model unreachable after N failed attempts`. While waiting you get a live heartbeat every 30 s (`[llm] · still waiting… 120s/600s`) plus a `transport attempt i/n failed -- retrying` line, so a slow turn is never a blank screen. A full 40-step run typically takes 15–60 minutes. A faster/stronger model (`velora models use zen/glm-5.2`) cuts this dramatically; so does a smaller `--max-steps`. `Ctrl+C` stops cleanly at any point. When pasting multi-line commands, keep each line-ending `\` as the very last character (no trailing spaces) or join them into one line.
 
 **Grey-box upgrade (if you can get the source):** any source you legitimately have — the app's public repo, a client-provided drop, the deploy artifact — makes the run dramatically more efficient. The symbolic scan proves reachable flaws, and `--guidance` hands the agent the exact endpoint, parameter, and sink as leads:
 
@@ -538,6 +538,44 @@ Why these two pieces:
 - **`--format sarif -o results.sarif`** — SARIF is the interchange format for static-analysis results; uploading it decorates pull requests with annotations in GitHub's Security tab.
 - **`--fail-on high`** — the gate: exit 1 (build failure) when findings of `high` severity or above exist. Lower it (`--fail-on critical`) to fail only on the worst, raise it (`--fail-on any`) to fail on everything, or `--fail-on none` to always exit 0 and just report.
 
+## Command pack: black-box, white-box & enterprise
+
+Ready-to-copy-paste commands for the three engagement modes. Targets are `https://www.hackthissite.org/` (a consent-based CTF/wargame — its own site calls it "a free, safe and legal training ground for hackers"), the bundled practice target at `127.0.0.1:8080`, and `<scope>` placeholders. `# PROPOSED:` marks a flag the mission needs that the CLI does not have yet — those rows document the gap, they do not run today.
+
+```bash
+# --- Setup (any mode): zero-key model via the local opencode bridge ---
+velora setup                                                        # bootstrap Node + opencode + bridge, start the daemon
+velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt   # activate a free Zen model (no API key)
+velora doctor --probe                                               # live round-trip test: model + bridge are actually working
+
+# --- Black-box: live URL only, no source ---
+velora exploit --target https://www.hackthissite.org/ --goal 'solve an HTS basic mission and document the vulnerability' --max-steps 40
+velora exploit --target http://127.0.0.1:8080 --goal 'steal the flag from /admin and POST it to /report' --success-check 'curl -sf http://127.0.0.1:8080/pwned' --max-steps 30
+velora exploit --target https://www.hackthissite.org/ --goal 'enumerate the login form and test for SQL injection' --format json --trace-out evidence.json
+velora exploit --target https://www.hackthissite.org/ --goal 'test the upload feature for webshell delivery' --proxy http://127.0.0.1:8080 --header 'X-Bounty: program-slug'   # PROPOSED: --proxy/--header not implemented yet
+velora exploit --target https://www.hackthissite.org/ --scope scope.txt --goal 'only touch paths under /challenges'   # PROPOSED: scope gate — non-loopback targets should require it
+velora recon --target https://www.hackthissite.org/ --scope scope.txt -f json -o endpoints.json                     # PROPOSED: recon feeding exploit --guidance (black-box has no source scan)
+
+# --- White-box: source in hand, proofs + patching ---
+velora scan ./src -f json -o findings.json --fail-on high             # scan once; findings.json drives exploit and fix
+velora scan ./src --ai -f json -o findings.json                       # add LLM detection + triage on top of the symbolic engine
+velora scan ./src -f json | velora exploit --guidance - --target http://127.0.0.1:8080 --goal 'exploit the findings from the scan'
+velora fix ./src --guidance findings.json --diff                      # preview model-generated patches as a unified diff
+velora fix ./src --guidance findings.json --in-place                  # apply patches, then re-scan each one to verify
+velora check entailments.txt --format json --stop-on-failure          # batch-prove a file of entailments, one per line
+velora solve 'x |-> 5 * y |-> 3 |- x |-> 5' --timeout 10000           # one entailment with a raised solver budget
+velora parse 'ls(x, y) * y |-> z |- ls(x, z)' --format json           # inspect how a formula tokenizes/parses
+
+# --- Enterprise: CI gates, fleets, authenticated scale ---
+velora scan ./src --fail-on critical -f sarif -o report.sarif         # CI gate: exit 1 on criticals, SARIF for the Security tab
+velora serve-bridge --start                                           # fleet: daemonize the bridge once per machine, then doctor --probe
+velora scan ./src --ai --proxy http://proxy.corp:3128 --scope corp-scope.txt --insecure -f json --fail-on high   # PROPOSED: corporate egress proxy + scope + lab TLS
+```
+
+- **`--success-check`** is the authoritative oracle: it is re-run after every step and decides success, so a model claim can never fake an exit code 0.
+- **`--format json --trace-out`** keeps the machine-readable summary plus the full transcript (commands + responses) for the report.
+- **Exit codes:** `0` = proven/solved/clean · `1` = invalid findings/not solved · `2` = usage/LLM unreachable. Pipeline on them directly (`|| echo "gate failed"`).
+
 ## Commands Reference
 
 One CLI for the whole workflow plus the solver. `velora <command> --help` prints every flag; the sections above explain when and why to use each one.
@@ -576,7 +614,7 @@ One CLI for the whole workflow plus the solver. `velora <command> --help` prints
 | `velora scan` prints findings but exits 1 | Not a crash — the severity gate: default `--fail-on high` exits 1 when high+ findings exist | Expected for a vulnerable file; `--fail-on none` to always exit 0 |
 | `--ai` says no endpoint/model configured | No model set up yet | `velora setup`, then `velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt` |
 | `bridge ... not running` / `velora doctor` exits 1 | Bridge daemon is down | `velora serve-bridge --start` (or run `velora models tui`, which starts it for you) |
-| Exploit sits on `thinking...` for a while | Normal free-tier latency (30–90 s per step, ceiling 5 min per step) | Wait it out; verify the chain with `velora doctor --probe`; or switch to a faster model |
+| Exploit sits on `thinking...` for a while | Normal free-tier latency (30–90 s per step; deadline 600 s per attempt, ≤3 attempts + one step retry) | Watch the heartbeat (`[llm] · still waiting… 120s/600s`) — if it keeps ticking the turn is alive; verify the chain with `velora doctor --probe`, or switch to a faster model |
 | `no response from the model -- retrying` in an exploit run | One round-trip came back empty (slow/overloaded endpoint); it retries automatically | Wait — if the run ends `✗ NOT EXPLOITED (reason=model unreachable after 2 failed attempts)` the endpoint is really down: `velora doctor --probe`, `velora serve-bridge --start`, check `~/.local/state/velora/bridge.log` |
 | Exploit ends `✗ NOT EXPLOITED` | Step budget ran out or the goal wasn't achieved | Rephrase `--goal`, raise `--max-steps`, use a stronger model, or add `--guidance` from a scan |
 | `velora scan --ai` is slow on first files | Model cold start / bridge warm-up | Normal; later files are faster |

@@ -128,7 +128,7 @@ Model settings resolve per field in this order: **`--model` flag → `VELORA_LLM
 | `VELORA_LLM_API_KEY` | — | API key (leave empty for local servers) |
 | `VELORA_LLM_REPO_ROOT` | — | Repo root for the agentic cross-file `read_file`/`grep` tools |
 | `VELORA_LLM_TIMEOUT` | `120` | Max gap (seconds) between network bytes on a model call |
-| `VELORA_LLM_AGENT_TIMEOUT` | `300` | Overall budget (seconds) for one `exploit`/agent round-trip — free-tier turns of 30–90 s fit with headroom |
+| `VELORA_LLM_AGENT_TIMEOUT` | `300` | Socket-gap budget (seconds) between bytes for one agent round-trip; the wall-clock deadline is `max(gap × 2, 600)` s per attempt (pin it absolutely with `VELORA_LLM_TOTAL_TIMEOUT`). Free-tier turns of 30–90 s fit with headroom |
 | `VELORA_LLM_AGENT_RETRIES` | `2` | Extra HTTP attempts inside a round-trip before it counts as a failure |
 | `VELORA_SKIP_PROVIDER_FALLBACK` | — | `=1` disables the opencode config auto-fallback |
 
