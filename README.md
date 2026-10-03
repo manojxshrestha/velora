@@ -82,7 +82,7 @@ Everything beyond the quick start lives in [`docs/`](docs/):
 | Guide | What's inside |
 |-------|---------------|
 | [Installation & Setup](docs/installation.md) | Requirements, install variants, zero-key AI setup, the bridge, environment variables, platform support |
-| [Usage & Commands](docs/usage.md) | The scan → exploit → fix loop; scan, exploit, and fix explained flag by flag with example output; AI & model setup; black-box testing + bug-hunting guide; separation-logic solver; CI/CD; troubleshooting; grouped command reference |
+| [Usage & Commands](docs/usage.md) | Command pack of copy-pasteable examples for black-box, white-box & enterprise testing; the scan → exploit → fix loop explained flag by flag; AI & model setup; black-box bug-hunting guide; separation-logic solver; troubleshooting; grouped command reference |
 | [Detection](docs/detection.md) | Supported languages, 80+ vulnerability detectors, how detection works |
 | [AI Layer & Models](docs/ai-models.md) | LLM detection & triage, RAM & model requirements, model providers (zero-key, Zen, local) |
 | [Python API & Symbolic Core](docs/api.md) | Embedding Velora in Python; the separation-logic + Z3 foundation |
@@ -206,7 +206,7 @@ Every command, grouped by what it's for — `velora <command> --help` prints all
 
 - **Patch what you find** — [Fix](docs/usage.md#fix): preview a minimal diff, apply it, and re-scan to *prove* the vulnerability is gone.
 - **Hunt bugs on a live target** — [Bug hunting guide](docs/usage.md#bug-hunting-guide-worked-example-examplecom): a full black-box campaign, step by step, with goal recipes per vulnerability class.
-- **Wire it into CI** — [CI/CD](docs/usage.md#cicd): SARIF output + severity gate for GitHub Actions.
+- **Wire it into CI** — [Scan flags](docs/usage.md#scan): SARIF output + `--fail-on` severity gate for GitHub Actions.
 - **Set up the AI layer** — [AI & Model Setup](docs/usage.md#ai--model-setup): zero-key bridge, `velora models tui` picker, environment variables.
 - **Embed it** — [Python API](docs/api.md#python-api) or the [Commands Reference](docs/usage.md#commands-reference).
 
