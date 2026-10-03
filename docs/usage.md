@@ -17,21 +17,21 @@ velora setup && velora doctor --probe   # one-time AI setup: bootstrap + verify 
 The full loop — one `findings.json` drives every stage:
 
 ```bash
-velora scan ./target-app --ai -f json -o findings.json                       # 1. detect
-velora exploit --target http://localhost:8080 --guidance findings.json \
+velora scan . --ai -f json -o findings.json                       # 1. detect
+velora exploit --target https://target.com --guidance findings.json \
   --goal 'read the admin secret'                                             # 2. exploit (live, authorized)
-velora fix ./target-app/app.py --guidance findings.json --diff               # 3. preview patches
-velora fix ./target-app/app.py --guidance findings.json --in-place           # 4. apply + re-scan to verify
-velora scan ./target-app --ai                                                # 5. confirm it's gone
+velora fix . --guidance findings.json --diff               # 3. preview patches
+velora fix . --guidance findings.json --in-place           # 4. apply + re-scan to verify
+velora scan . --ai                                                # 5. confirm it's gone
 ```
 
-Pipes work too (`-` = stdin): `velora scan ./src -f json | velora exploit --guidance - --target http://localhost:8080 --goal '…'`.
+Pipes work too (`-` = stdin): `velora scan . -f json | velora exploit --guidance - --target https://target.com --goal '…'`.
 
 Exit codes everywhere: **`0`** = success/proven/clean · **`1`** = findings / invalid / not solved · **`2`** = usage error or LLM unreachable.
 
 ## Command pack: black-box, white-box & enterprise
 
-The three testing modes as ready-to-copy-paste commands. Targets: `https://www.hackthissite.org/` (consent-based CTF/wargame), `http://127.0.0.1:8080` (`python examples/practice_target.py`), `https://example.com`, `scope.txt` placeholders. `# PROPOSED:` = mission-needed command/flag that is not implemented yet.
+The three testing modes as ready-to-copy-paste commands. Every command runs as-is: paths are `.`, the remote target is `https://target.com` (one find-and-replace to your own authorized target), plus the local practice target `http://127.0.0.1:8080` (`python examples/practice_target.py`) and `scope.txt` placeholders. `# PROPOSED:` = mission-needed command/flag that is not implemented yet.
 
 ### Black-box: live URL only, no source
 
@@ -46,60 +46,60 @@ velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt
 velora doctor --probe
 
 # map the surface and probe for one high-confidence flaw (recon run)
-velora exploit --target https://www.hackthissite.org/ --goal 'map the application surface (pages, forms, parameters) and probe them for one high-confidence flaw' --max-steps 20
+velora exploit --target https://target.com --goal 'map the application surface (pages, forms, parameters) and probe them for one high-confidence flaw' --max-steps 20
 
 # solve an HTS mission against the live consent-based target
-velora exploit --target https://www.hackthissite.org/ --goal 'solve an HTS basic mission and document the vulnerability' --max-steps 40
+velora exploit --target https://target.com --goal 'solve a beginner-level mission and document the vulnerability' --max-steps 40
 
 # local practice target with an external success oracle (never faked by the model)
 velora exploit --target http://127.0.0.1:8080 --goal 'steal the flag from /admin and POST it to /report' --success-check 'curl -sf http://127.0.0.1:8080/pwned' --max-steps 30
 
 # pin success with your own oracle: re-run after every step, exit 0 = solved
-velora exploit --target https://example.com --goal 'access a protected page without logging in' --success-check 'curl -sk https://example.com/private | grep -qi secret'
+velora exploit --target https://target.com --goal 'access a protected page without logging in' --success-check 'curl -sk https://target.com/private | grep -qi secret'
 
 # keep machine-readable output + the full command/response transcript as evidence
-velora exploit --target https://www.hackthissite.org/ --goal 'enumerate the login form and test for SQL injection' --format json --trace-out evidence.json
+velora exploit --target https://target.com --goal 'enumerate the login form and test for SQL injection' --format json --trace-out evidence.json
 
-# AI detection over any pulled-down artifacts (JS bundles, downloaded pages)
-velora scan ./hts-artifacts --ai -f json -o findings.json
+# AI detection over artifacts in the current dir (curl the target's JS bundles/pages in first)
+velora scan . --ai -f json -o findings.json
 
 # PROPOSED: retest previously-fixed findings after a patch lands (command not implemented yet)
-velora retest --guidance findings.json --target https://www.hackthissite.org/
+velora retest --guidance findings.json --target https://target.com
 
 # PROPOSED: route through Burp and send a program-identifying header (flags not implemented yet)
-velora exploit --target https://www.hackthissite.org/ --goal 'test the upload feature for webshell delivery' --proxy http://127.0.0.1:8080 --header 'X-Bounty: program-slug'
+velora exploit --target https://target.com --goal 'test the upload feature for webshell delivery' --proxy http://127.0.0.1:8080 --header 'X-Bounty: program-slug'
 ```
 
 ### White-box: source in hand, proofs + patching
 
 ```bash
 # scan the target's source (repo or artifacts you have) -> findings.json
-velora scan ./target-src -f json -o findings.json --fail-on high
+velora scan . -f json -o findings.json --fail-on high
 
 # same scan with AI detection + triage on top of the symbolic engine
-velora scan ./target-src --ai -f json -o findings.json
+velora scan . --ai -f json -o findings.json
 
 # pipe the scan straight into the agent and attack the live target with those leads
-velora scan ./target-src -f json | velora exploit --guidance - --target https://www.hackthissite.org/ --goal 'exploit the proven findings on the live target'
+velora scan . -f json | velora exploit --guidance - --target https://target.com --goal 'exploit the proven findings on the live target'
 
 # preview model-generated patches as a unified diff
-velora fix ./target-src --guidance findings.json --diff
+velora fix . --guidance findings.json --diff
 
 # apply patches, then re-scan each file to verify the fix landed
-velora fix ./target-src --guidance findings.json --in-place
+velora fix . --guidance findings.json --in-place
 ```
 
 ### Enterprise: CI gates, fleets, authenticated scale
 
 ```bash
 # CI gate: exit 1 on criticals, SARIF decorates PRs in GitHub's Security tab
-velora scan ./target-src --fail-on critical -f sarif -o report.sarif
+velora scan . --fail-on critical -f sarif -o report.sarif
 
 # fleet setup: daemonize the bridge once per machine, then run doctor --probe
 velora serve-bridge --start
 
 # PROPOSED: authenticated enterprise run - scope file + login flow (flags not implemented yet)
-velora exploit --target https://app.corp.example --scope corp-scope.txt --login-url https://app.corp.example/login --login-user svc --login-pass-env CORP_PASS --goal 'reach the admin dashboard'
+velora exploit --target https://target.com --scope scope.txt --login-url https://target.com/login --login-user svc --login-pass-env CORP_PASS --goal 'reach the admin dashboard'
 ```
 
 - **`--success-check`** is the authoritative oracle: re-run after every step, exit 0 = solved — a model claim can never fake it.
@@ -132,7 +132,7 @@ Symbolic scans finish in milliseconds; each `--ai` file costs one or more LLM ca
 **`velora exploit` drives an LLM agent against a live target** — `--target` is a **URL**, and it must be authorized: a target you own, or one a program lists as in-scope. Practice locally with `python examples/practice_target.py` (serves `http://127.0.0.1:8080`; win by stealing the admin flag to `/report`, then `GET /pwned` returns 200 → `--success-check 'curl -sf http://127.0.0.1:8080/pwned'`).
 
 ```bash
-velora exploit --target http://localhost:8080 --goal 'read the admin secret'
+velora exploit --target https://target.com --goal 'read the admin secret'
 ```
 
 One run = one goal. The agent executes real commands (curl, python, nc, sqlmap, …) in a recon → hypothesis → payload → verify loop. Exit **0** = verified success, **1** = not solved.
@@ -146,7 +146,7 @@ Key flags: `--goal '<words>'` (specific wording gets specific results) · `--suc
 **Grey-box:** if you have any source (public repo, client drop, deploy artifact), prime the agent — runs converge far faster:
 
 ```bash
-velora scan ./target-src --ai -f json -o findings.json
+velora scan . --ai -f json -o findings.json
 velora exploit --target https://target.com --guidance findings.json \
   --goal 'exploit the proven SQL injection to dump the users table'
 ```
@@ -179,9 +179,9 @@ velora exploit --target https://target.com --goal 'bypass authentication on /adm
 velora exploit --target https://target.com --goal 'read /etc/passwd via the file download feature'
 ```
 
-### Bug hunting guide (worked example: `example.com`)
+### Bug hunting guide (worked example: `target.com`)
 
-A compact black-box campaign, one hypothesis at a time. **Authorization first:** only test targets you own or are explicitly in scope for — `example.com` is IANA's reserved *documentation* domain, treat it as a placeholder for your authorized target (your app, `python examples/practice_target.py`, or a program's listed scope).
+A compact black-box campaign, one hypothesis at a time. **Authorization first:** only test targets you own or are explicitly in scope for — `target.com` is a stand-in for *your* in-scope target (swap it out), your app via `python examples/practice_target.py`, or a program's listed scope.
 
 **Step 0 — Setup (one-time):**
 
@@ -193,7 +193,7 @@ velora models tui                       # full-screen picker: opencode bridge + 
 **Step 1 — Recon run (unguided):** exit 0 = verified win; exit 1 = iterate on the goal wording.
 
 ```bash
-velora exploit --target https://example.com \
+velora exploit --target https://target.com \
   --goal 'map the application surface (pages, forms, parameters) and probe them for one high-confidence flaw' \
   --max-steps 20
 ```
@@ -212,21 +212,21 @@ velora exploit --target https://example.com \
 | Secrets / info leak | `search responses, JS bundles, and common backup paths for hardcoded keys or tokens` |
 
 ```bash
-velora exploit --target https://example.com \
+velora exploit --target https://target.com \
   --goal 'test every search/query parameter for SQL injection' --max-steps 40
 
-velora exploit --target https://example.com \
+velora exploit --target https://target.com \
   --goal 'check whether login reveals which usernames are valid (user enumeration)' --max-steps 30
 ```
 
 **Step 3 — Pin success with an oracle** and **step 4 — keep the evidence:**
 
 ```bash
-velora exploit --target https://example.com \
+velora exploit --target https://target.com \
   --goal 'access a protected page without logging in' \
-  --success-check 'curl -sk https://example.com/private | grep -qi "secret"'
+  --success-check 'curl -sk https://target.com/private | grep -qi "secret"'
 
-velora exploit --target https://example.com --goal '…' \
+velora exploit --target https://target.com --goal '…' \
   --trace-out trace.json --format json > report.json
 ```
 

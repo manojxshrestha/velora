@@ -205,7 +205,7 @@ Every command, grouped by what it's for — `velora <command> --help` prints all
 ## What next
 
 - **Patch what you find** — [Fix](docs/usage.md#fix): preview a minimal diff, apply it, and re-scan to *prove* the vulnerability is gone.
-- **Hunt bugs on a live target** — [Bug hunting guide](docs/usage.md#bug-hunting-guide-worked-example-examplecom): a full black-box campaign, step by step, with goal recipes per vulnerability class.
+- **Hunt bugs on a live target** — [Bug hunting guide](docs/usage.md#bug-hunting-guide-worked-example-targetcom): a full black-box campaign, step by step, with goal recipes per vulnerability class.
 - **Wire it into CI** — [Scan flags](docs/usage.md#scan): SARIF output + `--fail-on` severity gate for GitHub Actions.
 - **Set up the AI layer** — [AI & Model Setup](docs/usage.md#ai--model-setup): zero-key bridge, `velora models tui` picker, environment variables.
 - **Embed it** — [Python API](docs/api.md#python-api) or the [Commands Reference](docs/usage.md#commands-reference).
