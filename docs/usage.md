@@ -36,69 +36,74 @@ The three testing modes as ready-to-copy-paste commands. Every command runs as-i
 ### Black-box: live URL only, no source
 
 ```bash
-# bootstrap Node + opencode + the bridge, and start the daemon (one-time, any mode)
+# one-time 1/3: bootstrap Node + opencode + the bridge, start the daemon
 velora setup
 
-# activate a free Zen model through the bridge (no API key needed)
+# one-time 2/3: activate a free Zen model through the bridge (no API key)
 velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt
 
-# verify model + bridge with one live round-trip (exit 0 = healthy)
+# one-time 3/3: one real round-trip -- exit 0 = ready (any mode, run once)
 velora doctor --probe
 
-# map the surface and probe for one high-confidence flaw (recon run)
+# runs A-E are standalone: --target in, verdict out (exit 0 solved / 1 not solved / 2 unreachable)
+
+# run A: recon -- target in, surface mapped, one flaw probed -> exit 0 = verified win
 velora exploit --target https://target.com --goal 'map the application surface (pages, forms, parameters) and probe them for one high-confidence flaw' --max-steps 20
 
-# solve an HTS mission against the live consent-based target
+# run B: CTF-style goal -- solve a beginner mission -> exit 0 = solved
 velora exploit --target https://target.com --goal 'solve a beginner-level mission and document the vulnerability' --max-steps 40
 
-# local practice target with an external success oracle (never faked by the model)
+# run C: local drill -- practice target in, oracle re-checked after every step -> flag stolen
 velora exploit --target http://127.0.0.1:8080 --goal 'steal the flag from /admin and POST it to /report' --success-check 'curl -sf http://127.0.0.1:8080/pwned' --max-steps 30
 
-# pin success with your own oracle: re-run after every step, exit 0 = solved
+# run D: oracle-pinned -- success = your --success-check exits 0, never the model's word
 velora exploit --target https://target.com --goal 'access a protected page without logging in' --success-check 'curl -sk https://target.com/private | grep -qi secret'
 
-# keep machine-readable output + the full command/response transcript as evidence
+# run E: evidence -- JSON summary on stdout + full transcript -> evidence.json for the report
 velora exploit --target https://target.com --goal 'enumerate the login form and test for SQL injection' --format json --trace-out evidence.json
 
-# AI detection over artifacts in the current dir (curl the target's JS bundles/pages in first)
+# optional: artifacts you curl'd into this dir in -> findings.json out (needs --ai)
 velora scan . --ai -f json -o findings.json
 
-# PROPOSED: retest previously-fixed findings after a patch lands (command not implemented yet)
+# PROPOSED: retest -- reads findings.json, re-verifies each finding against the target (command not implemented)
 velora retest --guidance findings.json --target https://target.com
 
-# PROPOSED: route through Burp and send a program-identifying header (flags not implemented yet)
+# PROPOSED: Burp routing -- sends through proxy + program header (flags not implemented yet)
 velora exploit --target https://target.com --goal 'test the upload feature for webshell delivery' --proxy http://127.0.0.1:8080 --header 'X-Bounty: program-slug'
 ```
 
 ### White-box: source in hand, proofs + patching
 
 ```bash
-# scan the target's source (repo or artifacts you have) -> findings.json
+# step 1/4a: source in (cwd) -> findings.json out; --fail-on high gates the exit code
 velora scan . -f json -o findings.json --fail-on high
 
-# same scan with AI detection + triage on top of the symbolic engine
+# step 1/4b: same scan with the AI layer on top (model detection + false-positive triage)
 velora scan . --ai -f json -o findings.json
 
-# pipe the scan straight into the agent and attack the live target with those leads
+# step 2/4a: pipe findings in via stdin -> agent attacks the live target with those leads
 velora scan . -f json | velora exploit --guidance - --target https://target.com --goal 'exploit the proven findings on the live target'
 
-# preview model-generated patches as a unified diff
+# step 2/4b: or read the file instead of the pipe -- findings.json in, verdict out
+velora exploit --guidance findings.json --target https://target.com --goal 'exploit the proven findings on the live target'
+
+# step 3/4: findings.json in -> unified diff out (preview only, nothing written)
 velora fix . --guidance findings.json --diff
 
-# apply patches, then re-scan each file to verify the fix landed
+# step 4/4: findings.json in -> patches applied, each file re-scanned to prove the fix landed
 velora fix . --guidance findings.json --in-place
 ```
 
 ### Enterprise: CI gates, fleets, authenticated scale
 
 ```bash
-# CI gate: exit 1 on criticals, SARIF decorates PRs in GitHub's Security tab
+# CI gate: source in (cwd) -> report.sarif out + exit 1 on any critical (fails the pipeline on purpose)
 velora scan . --fail-on critical -f sarif -o report.sarif
 
-# fleet setup: daemonize the bridge once per machine, then run doctor --probe
+# fleet: start the bridge daemon once per machine -> then verify with `velora doctor --probe`
 velora serve-bridge --start
 
-# PROPOSED: authenticated enterprise run - scope file + login flow (flags not implemented yet)
+# PROPOSED: authenticated run -- scope file + login flow (flags not implemented yet)
 velora exploit --target https://target.com --scope scope.txt --login-url https://target.com/login --login-user svc --login-pass-env CORP_PASS --goal 'reach the admin dashboard'
 ```
 
