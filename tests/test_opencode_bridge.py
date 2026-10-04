@@ -15,6 +15,8 @@ from velora.cli import create_parser, main
 from velora import bridge_cli, models_tui
 from velora.models_cli import _LOCAL_PROVIDERS, _resolve_generic
 from velora.sil import model_config
+from velora.sil.model_catalog import CatalogModel
+from velora.sil.opencode_bridge import OpencodeSetup, ProviderCfg
 
 BRIDGE_REF = "opencode-bridge/opencode/mimo-v2.6-flash-free"
 BRIDGE_BASE = "http://127.0.0.1:8399/v1"
@@ -174,6 +176,7 @@ class TestModelsTui:
         def boom(base_url, timeout=5.0):
             raise OSError("connection refused")
         monkeypatch.setattr(models_tui, "fetch_models", boom)
+        monkeypatch.setattr(models_tui, "zen_models", lambda *a, **k: [])
         self._non_tty(monkeypatch)
         assert models_tui.cmd_tui(_args()) == 1
         err = capsys.readouterr().err
@@ -348,6 +351,7 @@ class TestLocalEndpoints:
             raise OSError("not running")
 
         monkeypatch.setattr(models_tui, "fetch_models", fake_fetch)
+        monkeypatch.setattr(models_tui, "zen_models", lambda *a, **k: [])
         entries, summary = models_tui.discover(_args())
         assert len(entries) == 1
         entry = entries[0]
@@ -366,6 +370,7 @@ class TestLocalEndpoints:
             raise OSError("not running")
 
         monkeypatch.setattr(models_tui, "fetch_models", fake_fetch)
+        monkeypatch.setattr(models_tui, "zen_models", lambda *a, **k: [])
         entries, summary = models_tui.discover(_args())
         assert len(entries) == 1
         assert entries[0]["provider"] == "opencode-bridge"
@@ -498,3 +503,174 @@ class TestNodeBridgeUnitTests:
             capture_output=True, text=True, timeout=120,
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+class TestDiscoverPaidSources:
+    """Phase 1: opencode /connect, zen, and --registry rows in discover()."""
+
+    @staticmethod
+    def _stub(monkeypatch, bridge_ids=(), zen_rows=(), setup=None,
+              registry_rows=None, meta=None):
+        def fake_fetch(base_url, timeout=5.0):
+            if base_url.rstrip("/") == models_tui.DEFAULT_BRIDGE:
+                if bridge_ids:
+                    return list(bridge_ids)
+                raise OSError("bridge down")
+            raise OSError("not running")
+
+        monkeypatch.setenv("VELORA_LOCAL_URLS", "")
+        monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+        monkeypatch.delenv("VELORA_LLM_API_KEY", raising=False)
+        monkeypatch.setattr(models_tui, "fetch_models", fake_fetch)
+        monkeypatch.setattr(models_tui, "zen_models",
+                            lambda *a, **k: list(zen_rows))
+        monkeypatch.setattr(models_tui.opencode_bridge, "load_setup",
+                            lambda: setup)
+        monkeypatch.setattr(models_tui.opencode_bridge, "_models_dev_meta",
+                            lambda: (meta or {}))
+        if registry_rows is not None:
+            monkeypatch.setattr(models_tui, "registry_models",
+                                lambda *a, **k: list(registry_rows))
+
+    def test_discover_opencode_rows_native_counted_nokey(self, monkeypatch):
+        setup = OpencodeSetup(providers={
+            "openrouter": ProviderCfg(
+                id="openrouter", npm="@ai-sdk/openai-compatible",
+                base_url="https://openrouter.ai/api/v1", api_key="sk-or",
+                models={"qwen3-coder": "Qwen3 Coder"}),
+            "groq": ProviderCfg(id="groq", models={"llama-3.3-70b": "Llama"}),
+            "google": ProviderCfg(
+                id="google", npm="@ai-sdk/google", api_key="AIza-x",
+                models={"gemini-2.5": "G"}),
+            "ollama": ProviderCfg(
+                id="ollama", base_url="http://localhost:11434/v1",
+                models={"llama3": {}}),      # the live local probe owns it
+        })
+        self._stub(monkeypatch, setup=setup)
+        entries, summary = models_tui.discover(_args())
+        by = {(e["provider"], e["model"]): e for e in entries}
+        assert by[("openrouter", "qwen3-coder")]["key_status"] == "ok"
+        assert by[("openrouter", "qwen3-coder")]["source"] == "opencode"
+        assert by[("groq", "llama-3.3-70b")]["key_status"] == "nokey"
+        assert (by[("groq", "llama-3.3-70b")]["base_url"]
+                == "https://api.groq.com/openai/v1")
+        assert not any(e["provider"] == "google" for e in entries)
+        assert not any(e["provider"] == "ollama" for e in entries)
+        assert "opencode: 2 (1 no key, 1 native/phase 2)" in summary
+
+    def test_discover_zen_key_gate_and_bridge_dedup(self, monkeypatch):
+        zen = [
+            CatalogModel(provider="zen", id="mimo-v2.6-flash-free",
+                         name="m", free=True),
+            CatalogModel(provider="zen", id="glm-5.2", name="g", free=False,
+                         price_in=1.4, price_out=4.4, ready=True),
+            CatalogModel(provider="zen", id="claude-5", name="c", ready=False,
+                         transport="anthropic"),
+        ]
+        self._stub(monkeypatch, bridge_ids=["opencode/mimo-v2.6-flash-free"],
+                   zen_rows=zen)
+        entries, summary = models_tui.discover(_args())
+        zens = [e for e in entries if e["source"] == "zen"]
+        # bridge already serves the free id (dedup) and claude-5 is phase 2
+        assert [e["model"] for e in zens] == ["glm-5.2"]
+        assert zens[0]["key_status"] == "nokey"
+        assert "glm-5.2  $1.4/$4.4/1M" in zens[0]["label"]
+        assert "zen: 1 (0 free, no key)" in summary
+        monkeypatch.setenv("OPENCODE_API_KEY", "sk-zen")
+        entries2, summary2 = models_tui.discover(_args())
+        zens2 = [e for e in entries2 if e["source"] == "zen"]
+        assert zens2[0]["key_status"] == "ok"
+        assert "no key" not in summary2.split("zen:")[1].split(";")[0]
+
+    def test_discover_registry_ready_priced_dedup_keyed(self, monkeypatch):
+        model_config.save_credential("openai", "sk-oai")
+        rows = [
+            CatalogModel(provider="openai", id="gpt-5", name="GPT-5",
+                         price_in=1.25, price_out=10, ready=True,
+                         source="registry"),
+            CatalogModel(provider="groq", id="llama-x", name="L", free=True,
+                         ready=True, source="registry"),
+            CatalogModel(provider="anthropic", id="claude-5", name="C",
+                         ready=False, source="registry"),
+            CatalogModel(provider="opencode", id="glm-5.2", name="G",
+                         ready=True, source="registry"),   # zen already lists it
+        ]
+        zen = [CatalogModel(provider="zen", id="glm-5.2", name="G",
+                            ready=True)]
+        self._stub(monkeypatch, zen_rows=zen, registry_rows=rows)
+        entries, summary = models_tui.discover(_args(registry=True))
+        reg = {e["model"]: e for e in entries
+               if e["source"] == "velora-models"}
+        assert set(reg) == {"gpt-5", "llama-x"}   # not-ready + zen-deduped out
+        assert reg["gpt-5"]["key_status"] == "ok"
+        assert reg["gpt-5"]["base_url"] == "https://api.openai.com/v1"
+        assert "$1.25/$10/1M" in reg["gpt-5"]["label"]
+        assert reg["llama-x"]["key_status"] == "nokey"
+        assert "models.dev: 2 (1 no key)" in summary
+
+    def test_cli_registry_flag_registered(self):
+        args = create_parser().parse_args(["models", "tui", "--registry"])
+        assert args.models_action == "tui"
+        assert args.registry is True
+
+    @staticmethod
+    def _cmd_tui(monkeypatch, entry):
+        monkeypatch.setattr(models_tui.bridge_cli, "bridge_health",
+                            lambda: True)
+        monkeypatch.setattr(models_tui, "discover",
+                            lambda args=None: ([entry], "stub"))
+        monkeypatch.setattr(models_tui, "choose_prompt",
+                            lambda ms, active, input_fn=input: 0)
+        fake = type("Stream", (), {"isatty": lambda self: False})()
+        monkeypatch.setattr(sys, "stdin", fake)
+
+    def test_cmd_tui_nokey_selection_refused(self, monkeypatch, capsys):
+        entry = {"provider": "groq", "base_url": "https://api.groq.com/openai/v1",
+                 "model": "llama-3.3-70b", "source": "velora-models",
+                 "label": "[groq] llama-3.3-70b  FREE", "key_status": "nokey"}
+        self._cmd_tui(monkeypatch, entry)
+        assert models_tui.cmd_tui(_args()) == 1
+        assert model_config.active() is None          # nothing persisted
+        err = capsys.readouterr().err
+        assert "no API key for groq/llama-3.3-70b" in err
+        assert "--api-key" in err
+
+    def test_cmd_tui_opencode_selection_reuses_key_message(self, monkeypatch,
+                                                           capsys):
+        entry = {"provider": "openrouter",
+                 "base_url": "https://openrouter.ai/api/v1",
+                 "model": "qwen3-coder", "source": "opencode",
+                 "label": "[opencode] openrouter/qwen3-coder",
+                 "key_status": "ok"}
+        self._cmd_tui(monkeypatch, entry)
+        assert models_tui.cmd_tui(_args()) == 0
+        out = capsys.readouterr().out
+        assert "keys reused from opencode /connect (nothing copied)" in out
+        assert model_config.active()["source"] == "opencode"
+        assert not model_config.credentials_path().exists()
+
+    def test_cmd_tui_zen_message_by_key_state(self, monkeypatch, capsys):
+        entry = {"provider": "zen", "base_url": "https://opencode.ai/zen/v1",
+                 "model": "glm-5.2", "source": "zen",
+                 "label": "[zen] glm-5.2  $1.4/$4.4/1M", "key_status": "ok"}
+        self._cmd_tui(monkeypatch, entry)
+        assert models_tui.cmd_tui(_args()) == 0
+        assert "key reused from env / opencode /connect (nothing copied)" in \
+            capsys.readouterr().out
+        model_config.save_credential("zen", "sk-zen")      # stored earlier
+        self._cmd_tui(monkeypatch, entry)
+        assert models_tui.cmd_tui(_args()) == 0
+        assert "credentials 0600" in capsys.readouterr().out
+
+
+def test_models_tui_curses_key_constants_all_exist():
+    # KEY_PAGEUP/KEY_PAGEDOWN are not Python curses names (KEY_PPAGE/KEY_NPAGE
+    # are) -- a reference to them crashes run_curses on the first keypress.
+    import curses
+    import inspect
+    src = inspect.getsource(models_tui.run_curses)
+    assert "KEY_PAGEUP" not in src and "KEY_PAGEDOWN" not in src
+    for name in ("KEY_PPAGE", "KEY_NPAGE", "KEY_UP", "KEY_DOWN", "KEY_HOME",
+                 "KEY_END", "KEY_ENTER", "KEY_BACKSPACE"):
+        assert hasattr(curses, name), name
+        assert name in src

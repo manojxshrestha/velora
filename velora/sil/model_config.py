@@ -110,6 +110,45 @@ def active() -> Optional[dict]:
     return None
 
 
+# Providers that never need an API key (local servers / velora's own bridge).
+_KEYLESS_PROVIDERS = frozenset(
+    {"opencode-bridge", "ollama", "lmstudio", "llama.cpp", "optiq", "vllm"}
+)
+
+
+def provider_reuse_key(provider: str, _setup="auto") -> str:
+    """API key for `provider` resolved from env / opencode ``/connect``.
+
+    Velora stores nothing here -- consulted only after credentials.json
+    misses, so an explicit velora key always wins. Order mirrors
+    `velora models use`: OPENCODE_API_KEY (zen/opencode) > velora credentials
+    (zen also accepts the ``opencode`` provider id) > opencode's auth store.
+    Returns "" for keyless/local providers or when nothing is configured.
+    """
+    if not provider or provider in _KEYLESS_PROVIDERS:
+        return ""
+    alts = (provider, "opencode") if provider == "zen" else (provider,)
+    if provider in ("zen", "opencode"):
+        env = os.environ.get("OPENCODE_API_KEY")
+        if env:
+            return env
+    for pid in alts:
+        key = get_credential(pid)
+        if key:
+            return key
+    try:
+        from velora.sil.opencode_bridge import load_setup
+        setup = load_setup() if _setup == "auto" else _setup
+    except Exception:
+        return ""
+    if setup:
+        for pid in alts:
+            prov = setup.providers.get(pid)
+            if prov is not None and prov.api_key:
+                return prov.api_key
+    return ""
+
+
 def _fallback_active_model():
     """(provider, base_url, model, api_key, source) from velora config or opencode."""
     if os.environ.get("VELORA_SKIP_PROVIDER_FALLBACK"):
@@ -117,9 +156,13 @@ def _fallback_active_model():
     cfg = active()
     if cfg:
         provider = str(cfg.get("provider") or "")
-        return (provider, cfg["base_url"], cfg["model"],
-                get_credential(provider),
-                f"velora config ({config_path()})")
+        key = get_credential(provider)
+        source = f"velora config ({config_path()})"
+        if not key:
+            key = provider_reuse_key(provider)
+            if key:
+                source += ", key reused from opencode /connect"
+        return (provider, cfg["base_url"], cfg["model"], key, source)
     # opencode auto-fallback: only complete, OpenAI-compatible providers.
     try:
         from velora.sil.opencode_bridge import load_setup
@@ -131,7 +174,7 @@ def _fallback_active_model():
     prov = setup.providers.get(setup.default_provider)
     if prov is None or not prov.compatible or not prov.endpoint:
         return None
-    key = prov.api_key or ""
+    key = prov.api_key or provider_reuse_key(prov.id, _setup=setup)
     if not key and prov.id not in ("ollama", "lmstudio", "llama.cpp"):
         return None   # local servers need no key; hosted ones do
     return (prov.id, prov.endpoint, setup.default_model, key,

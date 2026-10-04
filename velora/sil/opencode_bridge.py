@@ -243,8 +243,30 @@ def _read_jsonc(path: Path) -> Optional[dict]:
         return None
 
 
+def _models_dev_meta() -> dict:
+    """models.dev provider metadata from velora's cache (never fetched).
+
+    Reads the cache file directly so callers on the hot config path never hit
+    the network; stale metadata is fine for npm/base-URL/model-name lookup.
+    Returns {} on any failure.
+    """
+    try:
+        from velora.sil.model_catalog import cache_dir
+        raw = json.loads((cache_dir() / "models.dev.json").read_text())
+        data = raw.get("data") if isinstance(raw, dict) else None
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 -- metadata is best-effort
+        return {}
+
+
 def load_setup() -> Optional[OpencodeSetup]:
-    """Merged opencode config + auth, or None when opencode isn't configured."""
+    """Merged opencode config + auth, or None when opencode isn't configured.
+
+    Providers declared in ``opencode.json`` win; providers that only exist in
+    ``auth.json`` (connected via opencode's ``/connect``) are merged in too,
+    with npm/base URL/model names taken from velora's cached models.dev data
+    so their keys become reusable by velora without copying them anywhere.
+    """
     paths = [p for p in config_candidates() if p.exists()]
     merged: dict = {}
     used: List[str] = []
@@ -290,6 +312,32 @@ def load_setup() -> Optional[OpencodeSetup]:
             npm=str(pcfg.get("npm") or ""),
             models=models,
             api_key=api_key,
+            oauth=oauth,
+        )
+    # auth-only providers: connected via /connect but never declared in config.
+    meta: Optional[dict] = None
+    for pid, entry in auth.items():
+        if pid in setup.providers:
+            continue                      # config-declared wins (key path above)
+        key, oauth = _api_key(entry)
+        if not key and not oauth:
+            continue                      # unusable auth entry
+        if meta is None:
+            meta = _models_dev_meta()
+        m = meta.get(pid) or {}
+        api = m.get("api")
+        base = api if isinstance(api, str) and api.startswith("http") else ""
+        models = {}
+        for mid, mdef in (m.get("models") or {}).items():
+            name = mdef.get("name") if isinstance(mdef, dict) else None
+            models[str(mid)] = str(name or mid)
+        setup.providers[pid] = ProviderCfg(
+            id=pid,
+            name=str(m.get("name") or pid),
+            base_url=base,
+            npm=str(m.get("npm") or ""),
+            models=models,
+            api_key=key,
             oauth=oauth,
         )
     default = merged.get("model") or ""

@@ -464,3 +464,86 @@ def test_cli_import_opencode_unusable_default_still_imports_keys(tmp_path, capsy
 def test_cli_import_opencode_absent_fails(capsys):
     assert main(["models", "import-opencode"]) == 1
     assert "no opencode configuration" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# auth-only providers (/connect) + key reuse (Phase 1: paid models)
+# ---------------------------------------------------------------------------
+
+def _write_models_dev(tmp_path, data):
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "models.dev.json").write_text(
+        json.dumps({"fetched_at": time.time(), "data": data}))
+
+
+def test_load_setup_merges_auth_only_provider(tmp_path):
+    _write_opencode(tmp_path, config_text="{}",
+                    auth={"google": {"type": "api", "key": "AIza-test"}})
+    _write_models_dev(tmp_path, {"google": {
+        "name": "Google", "npm": "@ai-sdk/google",
+        "models": {"gemini-flash-latest": {"name": "Gemini Flash Latest"}}}})
+    setup = load_setup()
+    assert setup is not None
+    assert "google" in setup.providers          # /connect key, never declared
+    g = setup.providers["google"]
+    assert g.api_key == "AIza-test"
+    assert not g.compatible                     # native AI SDK -> phase 2
+    assert g.models == {"gemini-flash-latest": "Gemini Flash Latest"}
+
+
+def test_load_setup_config_declared_not_overwritten_by_models_dev(tmp_path):
+    _write_opencode(tmp_path)                   # openrouter declared in config
+    _write_models_dev(tmp_path, {"openrouter": {
+        "npm": "@ai-sdk/google", "models": {"nope": {"name": "Nope"}}}})
+    setup = load_setup()
+    orouter = setup.providers["openrouter"]
+    assert list(orouter.models) == ["qwen/qwen3-coder"]   # config wins
+    assert orouter.npm == "@ai-sdk/openai-compatible"
+
+
+def test_provider_reuse_key_order_and_keyless(tmp_path, monkeypatch):
+    from velora.sil.model_config import provider_reuse_key
+
+    assert provider_reuse_key("") == ""
+    assert provider_reuse_key("ollama") == ""            # keyless local
+    # velora credentials win over everything below
+    model_config.save("openrouter", "https://openrouter.ai/api/v1", "m")
+    model_config.save_credential("openrouter", "sk-velora")
+    assert provider_reuse_key("openrouter") == "sk-velora"
+    # env for zen
+    monkeypatch.setenv("OPENCODE_API_KEY", "sk-zen-env")
+    assert provider_reuse_key("zen") == "sk-zen-env"
+    monkeypatch.delenv("OPENCODE_API_KEY")
+    # opencode auth store when velora has nothing for the provider
+    _write_opencode(tmp_path, config_text="{}")
+    monkeypatch.setenv("OPENCODE_AUTH_CONTENT", json.dumps(
+        {"groq": {"type": "api", "key": "sk-groq-auth"}}))
+    assert provider_reuse_key("groq") == "sk-groq-auth"
+    # zen accepts the opencode provider id too
+    monkeypatch.setenv("OPENCODE_AUTH_CONTENT", json.dumps(
+        {"opencode": {"type": "api", "key": "sk-zen-connect"}}))
+    assert provider_reuse_key("zen") == "sk-zen-connect"
+
+
+def test_resolve_reuses_opencode_key_when_velora_config_has_none(tmp_path,
+                                                                 monkeypatch):
+    monkeypatch.delenv("VELORA_SKIP_PROVIDER_FALLBACK")
+    _write_opencode(tmp_path, config_text="{}",
+                    auth={"groq": {"type": "api", "key": "sk-groq"}})
+    model_config.save("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b")
+    hit = model_config.resolve_llm_settings()
+    assert hit["api_key"] == "sk-groq"                   # reused, not copied
+    assert hit["source"].startswith("velora config")
+    assert "reused" in hit["source"]
+
+
+def test_resolve_velora_key_still_wins_over_reuse(tmp_path, monkeypatch):
+    monkeypatch.delenv("VELORA_SKIP_PROVIDER_FALLBACK")
+    _write_opencode(tmp_path, config_text="{}",
+                    auth={"groq": {"type": "api", "key": "sk-groq"}})
+    model_config.save("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b",
+                      api_key="sk-velora")
+    hit = model_config.resolve_llm_settings()
+    assert hit["api_key"] == "sk-velora"
+    assert "reused" not in hit["source"]
