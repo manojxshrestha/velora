@@ -134,6 +134,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--model",
         help="Override VELORA_LLM_MODEL for this scan (same as setting the env var)"
     )
+    scan_parser.add_argument(
+        "--no-tui", action="store_true",
+        help="Run plain even on a terminal (default on a TTY: live TUI; "
+             "pipes/redirects always stay plain). VELORA_TUI=0 also disables."
+    )
 
     # === EXPLOIT command ===
     exploit_parser = subparsers.add_parser(
@@ -183,6 +188,38 @@ def create_parser() -> argparse.ArgumentParser:
         "--trace-out",
         help="Write the full agent trace (system prompt, guidance, every tool call "
              "and result) as JSON to this file -- useful for comparing model behavior."
+    )
+    exploit_parser.add_argument(
+        "--no-tui", action="store_true",
+        help="Run plain even on a terminal (default on a TTY: live TUI with agent "
+             "feed, findings, and in-TUI report; pipes stay plain). "
+             "VELORA_TUI=0 also disables."
+    )
+
+    # === REPORT command ===
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Build a markdown report from findings JSON (+ optional exploit trace)",
+        description="Assemble `velora scan -o FILE -f json` findings and an "
+                    "`velora exploit --trace-out FILE` trace into one markdown "
+                    "report. On a TTY it opens a preview (j/k scroll, s save); "
+                    "with -o or a pipe it emits markdown directly."
+    )
+    report_parser.add_argument(
+        "findings", nargs="*",
+        help="Findings JSON files (single-file, multi-file, or bare list)"
+    )
+    report_parser.add_argument(
+        "--trace-out",
+        help="Exploit trace JSON written by `velora exploit --trace-out`"
+    )
+    report_parser.add_argument(
+        "-o", "--output",
+        help="Write markdown to this file (default: TTY preview / stdout)"
+    )
+    report_parser.add_argument(
+        "--subject",
+        help="Subject line for the report header (target URL / app name)"
     )
 
     # === FIX command ===
@@ -466,9 +503,110 @@ def _apply_model_override(args) -> None:
         os.environ["VELORA_LLM_MODEL"] = args.model
 
 
-def cmd_scan(args) -> int:
+# ---------------------------------------------------------------------------
+# Live TUI gate: documented `velora exploit` / `velora scan` open the curses
+# TUI on a terminal, spawn the exact same command as a piped child, and paint
+# its output.  Non-TTY runs (pipes, redirects, tests) are byte-identical to
+# the plain path -- the gate never fires there.
+# ---------------------------------------------------------------------------
+
+def _tui_active(args, raw_argv: List[str]) -> bool:
+    if os.environ.get("VELORA_TUI_CHILD") == "1":   # we are the wrapped child
+        return False
+    if os.environ.get("VELORA_TUI", "1").lower() in ("0", "false", "off", "no"):
+        return False
+    if getattr(args, "no_tui", False) or "--no-tui" in raw_argv:
+        return False
+    if getattr(args, "guidance", None) == "-":      # stdin carries data, not keys
+        return False
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _run_tui_wrap(args, raw_argv: List[str]) -> int:
+    """Spawn today's command as a child and hand its stream to the TUI."""
+    from velora.tui.render import run_tui
+    from velora.tui.runner import RunSpec, TuiRunner, child_argv
+
+    kind = args.command
+    spec = RunSpec(
+        argv=child_argv(list(raw_argv)),
+        kind=kind,
+        feed=(kind == "exploit"),
+        subject=getattr(args, "target", "") or "",
+        guidance_path=getattr(args, "guidance", None),
+        trace_out=getattr(args, "trace_out", None),
+        findings_out=(getattr(args, "output", None)
+                      if getattr(args, "format", None) == "json" else None),
+        env={"VELORA_TUI_CHILD": "1"},
+    )
+    runner = TuiRunner(spec)
+    try:
+        return run_tui(runner, kind=kind, subject=spec.subject)
+    except Exception:
+        # curses unavailable (TERM=dumb etc.): fall back to today's plain run
+        # with inherited stdio -- same bytes the user would have gotten.
+        if runner.child_done() is False:
+            runner.stop()
+        import subprocess
+        env = dict(os.environ)
+        env.update(spec.env)
+        return subprocess.call([sys.executable, "-m", "velora", *raw_argv],
+                               env=env)
+
+
+def cmd_report(args) -> int:
+    """Assemble findings JSON (+ optional exploit trace) into a markdown report."""
+    from velora.tui.report import build_report, load_findings, load_trace
+
+    findings: List[dict] = []
+    for path in args.findings or []:
+        try:
+            findings.extend(load_findings(path))
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error reading {path}: {exc}", file=sys.stderr)
+            return 1
+    trace = None
+    if args.trace_out:
+        try:
+            trace = load_trace(args.trace_out)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error reading {args.trace_out}: {exc}", file=sys.stderr)
+            return 1
+    md = build_report(findings, trace=trace,
+                      meta={"subject": args.subject or "",
+                            "model": (trace or {}).get("model", "")})
+    if args.output:
+        try:
+            Path(args.output).write_text(md, encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error writing {args.output}: {exc}", file=sys.stderr)
+            return 1
+        print(f"report written to {args.output} "
+              f"({len(findings)} finding{'s' if len(findings) != 1 else ''})")
+        return 0
+    try:
+        to_tty = sys.stdout.isatty()
+    except Exception:
+        to_tty = False
+    if to_tty and (findings or trace):
+        from velora.tui.render import preview_markdown
+        saved = preview_markdown(md)
+        if saved:
+            print(f"report saved to {saved}")
+        return 0
+    print(md, end="")
+    return 0
+
+
+def cmd_scan(args, _raw_argv: Optional[List[str]] = None) -> int:
     """Execute scan command"""
     _apply_model_override(args)
+    raw = list(_raw_argv) if _raw_argv is not None else list(sys.argv[1:])
+    if _tui_active(args, raw):
+        return _run_tui_wrap(args, raw)
     # Delegate to the SIL scanner CLI
     from velora.sil.cli import cmd_scan as sil_scan
     return sil_scan(args)
@@ -546,7 +684,7 @@ def _select_findings(findings: List[dict], n: int = 6) -> List[dict]:
     return out
 
 
-def cmd_exploit(args) -> int:
+def cmd_exploit(args, _raw_argv: Optional[List[str]] = None) -> int:
     """Execute exploit command - run the LLM exploitation agent against a target."""
     import subprocess
     from velora.sil.llm_client import LLMConfig
@@ -562,6 +700,9 @@ def cmd_exploit(args) -> int:
         print("Error: set VELORA_LLM_BASE_URL and VELORA_LLM_MODEL (an OpenAI-compatible "
               "endpoint) to use the exploit agent.", file=sys.stderr)
         return 1
+    raw = list(_raw_argv) if _raw_argv is not None else list(sys.argv[1:])
+    if _tui_active(args, raw):
+        return _run_tui_wrap(args, raw)
     config.exploit_max_steps = args.max_steps
 
     # Optional guidance: findings JSON (file or '-' stdin) -> top finding -> guidance.
@@ -1327,10 +1468,13 @@ def main(argv: List[str] = None) -> int:
         parser.print_help()
         return 0
 
+    raw_argv = list(argv) if argv is not None else list(sys.argv[1:])
+
     # Dispatch to command handler
     commands = {
         "scan": cmd_scan,
         "exploit": cmd_exploit,
+        "report": cmd_report,
         "fix": cmd_fix,
         "solve": cmd_solve,
         "check": cmd_check,
@@ -1345,6 +1489,8 @@ def main(argv: List[str] = None) -> int:
     handler = commands.get(args.command)
     if handler:
         try:
+            if args.command in ("scan", "exploit"):
+                return handler(args, _raw_argv=raw_argv)
             return handler(args)
         except KeyboardInterrupt:
             print("\ninterrupted -- stopping (exit 130)", file=sys.stderr)
