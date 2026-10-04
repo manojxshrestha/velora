@@ -2,6 +2,8 @@
 // OpenAI-compatible bridge exposing opencode's provider catalog to Velora.
 // Velora holds no API keys: opencode owns auth and (free) model access.
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
 import { pathToFileURL } from "node:url";
 import { createOpencode } from "@opencode-ai/sdk";
 
@@ -9,6 +11,9 @@ const PROVIDER_ID = "opencode";
 const MODEL_PREFIX = "opencode/";
 const DEFAULT_BRIDGE_PORT = 8399;
 const DEFAULT_OC_PORT = 4599;
+// Auxiliary opencode calls (session titles, etc.) pinned to a free model so
+// they can never silently bill a connected paid provider.
+const DEFAULT_SMALL_MODEL = `${MODEL_PREFIX}mimo-v2.6-flash-free`;
 
 const READ_ONLY_TOOLS = {
   read: true, grep: true, glob: true, list: true, bash: true,
@@ -42,24 +47,64 @@ export function parseArgs(argv) {
   return out;
 }
 
-export function parseModel(model) {
+function modelNotFound(message) {
+  const err = new Error(message);
+  err.status = 404;
+  err.type = "invalid_request_error";
+  err.code = "model_not_found";
+  return err;
+}
+
+// opencode/<mid>                     -> the free "opencode" provider (legacy)
+// opencode/<pid>/<mid...>            -> a connected provider from auth.json;
+//                                        <mid> keeps any further slashes so
+//                                        ids like openrouter/qwen/qwen3 work
+// `enabled` (array of provider ids) is optional; when given, an unknown <pid>
+// fails OpenAI-shaped 404 before opencode is ever consulted.
+export function parseModel(model, enabled) {
   if (typeof model !== "string" || !model.startsWith(MODEL_PREFIX)) {
-    const err = new Error(
+    throw modelNotFound(
       `this bridge only serves ${MODEL_PREFIX}* models (opencode provider); got ${JSON.stringify(model)}`);
-    err.status = 404;
-    err.type = "invalid_request_error";
-    err.code = "model_not_found";
-    throw err;
   }
-  const modelID = model.slice(MODEL_PREFIX.length);
-  if (!modelID || modelID.includes("/")) {
-    const err = new Error(`invalid opencode model id: ${JSON.stringify(model)}`);
-    err.status = 404;
-    err.type = "invalid_request_error";
-    err.code = "model_not_found";
-    throw err;
+  const rest = model.slice(MODEL_PREFIX.length);
+  if (!rest) {
+    throw modelNotFound(`invalid opencode model id: ${JSON.stringify(model)}`);
   }
-  return modelID;
+  const slash = rest.indexOf("/");
+  const providerID = slash === -1 ? PROVIDER_ID : rest.slice(0, slash);
+  const modelID = slash === -1 ? rest : rest.slice(slash + 1);
+  if (!providerID || !modelID) {
+    throw modelNotFound(`invalid opencode model id: ${JSON.stringify(model)}`);
+  }
+  if (Array.isArray(enabled) && !enabled.includes(providerID)) {
+    throw modelNotFound(
+      `unknown provider '${providerID}' for model ${JSON.stringify(model)}`);
+  }
+  return { providerID, modelID };
+}
+
+// Provider ids that hold a hand-connected key in opencode's auth store.
+// Intent-only: read failure or missing file yields [] (bridge still serves
+// the free "opencode" provider) instead of flooding /v1/models with the
+// whole models.dev universe.
+export function authProviderIds(authPath) {
+  let path = authPath;
+  if (!path) {
+    const xdg = process.env.XDG_DATA_HOME;
+    const base = xdg ? xdg.replace(/\/+$/, "") : `${os.homedir()}/.local/share`;
+    path = `${base}/opencode/auth.json`;
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(path, "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    return [...new Set(Object.keys(raw).filter((k) => k && raw[k]))].sort();
+  } catch {
+    return [];
+  }
+}
+
+export function enabledProviders(authPath) {
+  return [...new Set([PROVIDER_ID, ...authProviderIds(authPath)])];
 }
 
 export function contentOf(message) {
@@ -169,20 +214,30 @@ function textFromParts(parts) {
   return out;
 }
 
-async function listOpencodeModels(client) {
-  const data = unwrap(await client.config.providers(), "providers");
-  const prov = (data?.providers || []).find((p) => p.id === PROVIDER_ID);
-  const models = Object.keys(prov?.models || {});
-  return models.sort().map((id) => ({
-    id: `${MODEL_PREFIX}${id}`,
-    object: "model",
-    created: 0,
-    owned_by: PROVIDER_ID,
-  }));
+// Pure mapping from opencode's /config/providers payload to OpenAI model
+// rows: the free provider keeps bare `opencode/<mid>` ids (backward
+// compatible), connected providers get `opencode/<pid>/<mid>`. Exported for
+// tests.
+export function composeModels(providers) {
+  const rows = [];
+  for (const prov of providers || []) {
+    const pid = String(prov?.id || "");
+    if (!pid) continue;
+    const prefix = pid === PROVIDER_ID ? MODEL_PREFIX : `${MODEL_PREFIX}${pid}/`;
+    for (const mid of Object.keys(prov?.models || {})) {
+      rows.push({ id: `${prefix}${mid}`, object: "model", created: 0, owned_by: pid });
+    }
+  }
+  return rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
-async function handleChat(client, body) {
-  const modelID = parseModel(body?.model);
+async function listOpencodeModels(client) {
+  const data = unwrap(await client.config.providers(), "providers");
+  return composeModels(data?.providers);
+}
+
+export async function handleChat(client, body, enabled) {
+  const { providerID, modelID } = parseModel(body?.model, enabled);
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   if (!messages.length) {
     throw Object.assign(new Error("messages must be a non-empty array"),
@@ -193,7 +248,7 @@ async function handleChat(client, body) {
   if (wantsTools) system = system ? `${system}\n\n${TOOL_BRIDGE_NOTE}` : TOOL_BRIDGE_NOTE;
   const transcript = flattenMessages(messages);
   const promptBody = {
-    model: { providerID: PROVIDER_ID, modelID },
+    model: { providerID, modelID },
     parts: [{ type: "text", text: transcript }],
   };
   if (wantsTools) promptBody.tools = READ_ONLY_TOOLS;
@@ -225,12 +280,16 @@ export async function startBridge(options = {}) {
   const bridgePort = Number(options.port ?? DEFAULT_BRIDGE_PORT);
   const opencodePort = Number(options["opencode-port"] ?? options.opencodePort ?? DEFAULT_OC_PORT);
   const enabled = options.tools === "off" ? false : true;
+  // opencode + every hand-connected provider (auth.json); on read failure
+  // this is just ["opencode"] and the bridge behaves exactly as before.
+  const providers = enabledProviders();
 
   const instance = await createOpencode({
     hostname: "127.0.0.1",
     port: opencodePort,
     config: {
-      enabled_providers: [PROVIDER_ID],
+      enabled_providers: providers,
+      small_model: options.small_model || DEFAULT_SMALL_MODEL,
       permission: { bash: "allow", edit: "allow", webfetch: "allow" },
     },
   });
@@ -239,7 +298,7 @@ export async function startBridge(options = {}) {
   const routes = {
     "GET /health": async () => ({
       status: 200,
-      body: { ok: true, provider: PROVIDER_ID, opencode_url: instance.server?.url || "" },
+      body: { ok: true, provider: PROVIDER_ID, providers, opencode_url: instance.server?.url || "" },
     }),
     "GET /v1/models": async () => ({
       status: 200,
@@ -250,9 +309,9 @@ export async function startBridge(options = {}) {
         const body = { ...(reqBody || {}) };
         delete body.tools;
         delete body.tool_choice;
-        return { status: 200, body: await handleChat(client, body) };
+        return { status: 200, body: await handleChat(client, body, providers) };
       }
-      return { status: 200, body: await handleChat(client, reqBody) };
+      return { status: 200, body: await handleChat(client, reqBody, providers) };
     },
   };
 
