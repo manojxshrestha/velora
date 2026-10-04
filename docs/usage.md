@@ -132,6 +132,16 @@ velora scan ./misc -l go --ai                    # force a language for odd exte
 
 Symbolic scans finish in milliseconds; each `--ai` file costs one or more LLM calls (seconds to tens of seconds).
 
+On a TTY a scan opens the [live TUI](#live-tui) (pipe output or pass `--no-tui` for plain text).
+
+## Live TUI
+
+**On a TTY, `velora scan` and `velora exploit` open a full-screen live view** — the command is the same, output is piped or `--no-tui` is passed:
+
+- `Tab` cycles panes (feed / progress / findings), `j` `k` `g` `G` `f` scroll
+- `r` opens the report preview (`s` saves it), `q` quits (asks before stopping a running agent)
+- `velora report [findings.json]` shows the same report outside the TUI — TTY prints a preview, `-o report.md` writes it
+
 ## Exploit
 
 **`velora exploit` drives an LLM agent against a live target** — `--target` is a **URL**, and it must be authorized: a target you own, or one a program lists as in-scope. Practice locally with `python examples/practice_target.py` (serves `http://127.0.0.1:8080`; win by stealing the admin flag to `/report`, then `GET /pwned` returns 200 → `--success-check 'curl -sf http://127.0.0.1:8080/pwned'`).
@@ -140,7 +150,7 @@ Symbolic scans finish in milliseconds; each `--ai` file costs one or more LLM ca
 velora exploit --target https://target.com --goal 'read the admin secret'
 ```
 
-One run = one goal. The agent executes real commands (curl, python, nc, sqlmap, …) in a recon → hypothesis → payload → verify loop. Exit **0** = verified success, **1** = not solved.
+One run = one goal. The agent executes real commands (curl, python, nc, sqlmap, …) in a recon → hypothesis → payload → verify loop. Exit **0** = verified success, **1** = not solved. On a TTY the run opens the [live TUI](#live-tui) (pipe output or pass `--no-tui` for plain text).
 
 Key flags: `--goal '<words>'` (specific wording gets specific results) · `--success-check '<cmd>'` (external oracle, overrides agent claims) · `--guidance <findings.json|->` (attack what a scan already proved) · `--max-steps <n>` (default 40) · `--exec-timeout <sec>` (default 120) · `--trace-out <file>` (full transcript for evidence) · `--format json` · `--model <id>` (override for this run).
 
