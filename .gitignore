@@ -1,3 +1,9 @@
+# Local runtime artifacts and agent notes (never push)
+logs/
+CLAUDE.md
+runs/
+velora-run.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
