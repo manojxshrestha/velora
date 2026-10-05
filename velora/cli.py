@@ -139,6 +139,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Run plain even on a terminal (default on a TTY: live TUI; "
              "pipes/redirects always stay plain). VELORA_TUI=0 also disables."
     )
+    scan_parser.add_argument(
+        "--curses", action="store_true",
+        help="Open the classic curses TUI instead of the default "
+             "PentestGPT-style interface (TTY only)."
+    )
 
     # === EXPLOIT command ===
     exploit_parser = subparsers.add_parser(
@@ -194,6 +199,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Run plain even on a terminal (default on a TTY: live TUI with agent "
              "feed, findings, and in-TUI report; pipes stay plain). "
              "VELORA_TUI=0 also disables."
+    )
+    exploit_parser.add_argument(
+        "--curses", action="store_true",
+        help="Open the classic curses TUI instead of the default "
+             "PentestGPT-style interface (TTY only)."
     )
 
     # === REPORT command ===
@@ -526,7 +536,13 @@ def _tui_active(args, raw_argv: List[str]) -> bool:
 
 
 def _run_tui_wrap(args, raw_argv: List[str]) -> int:
-    """Spawn today's command as a child and hand its stream to the TUI."""
+    """Spawn today's command as a child and hand its stream to the TUI.
+
+    Default on a TTY: the PentestGPT-style line interface (``velora.ptui``).
+    ``--curses`` (or VELORA_UI=curses) selects the classic curses view; if the
+    PentestGPT interface cannot load (missing deps) or crashes, we fall back
+    to curses and finally to today's plain run.
+    """
     from velora.tui.render import run_tui
     from velora.tui.runner import RunSpec, TuiRunner, child_argv
 
@@ -543,13 +559,35 @@ def _run_tui_wrap(args, raw_argv: List[str]) -> int:
         env={"VELORA_TUI_CHILD": "1"},
     )
     runner = TuiRunner(spec)
+
+    def _stop_quiet() -> None:
+        try:
+            if runner.child_done() is False:
+                runner.stop()
+        except Exception:
+            pass
+
+    use_curses = (getattr(args, "curses", False)
+                  or os.environ.get("VELORA_UI", "").lower() in ("curses", "ctty"))
+    if not use_curses:
+        try:
+            from velora.ptui import run_ptui
+        except ImportError:                     # rich/prompt_toolkit absent
+            run_ptui = None
+        if run_ptui is not None:
+            try:
+                return run_ptui(runner, kind=kind, subject=spec.subject)
+            except Exception:
+                # PentestGPT-style view failed: stop its child, retry with a
+                # fresh runner under the classic curses view.
+                _stop_quiet()
+                runner = TuiRunner(spec)
     try:
         return run_tui(runner, kind=kind, subject=spec.subject)
     except Exception:
         # curses unavailable (TERM=dumb etc.): fall back to today's plain run
         # with inherited stdio -- same bytes the user would have gotten.
-        if runner.child_done() is False:
-            runner.stop()
+        _stop_quiet()
         import subprocess
         env = dict(os.environ)
         env.update(spec.env)

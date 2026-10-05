@@ -139,17 +139,31 @@ def test_wrap_scan_sets_findings_out_only_for_json(clean_env, monkeypatch):
             seen["spec"] = spec
 
     monkeypatch.setattr("velora.tui.runner.TuiRunner", FakeRunner)
-    monkeypatch.setattr("velora.tui.render.run_tui",
-                        lambda *a, **k: 0)
+
+    def _fake_ui(name):
+        def _f(*a, **k):
+            seen["ui"] = name
+            return 0
+        return _f
+
+    monkeypatch.setattr("velora.tui.render.run_tui", _fake_ui("curses"))
+    monkeypatch.setattr("velora.ptui.run_ptui", _fake_ui("ptui"))
 
     args = _args(["scan", ".", "-f", "json", "-o", "/tmp/out.json"])
-    cli_mod._run_tui_wrap(args, ["scan", ".", "-f", "json", "-o", "/tmp/out.json"])
+    rc = cli_mod._run_tui_wrap(args, ["scan", ".", "-f", "json", "-o", "/tmp/out.json"])
+    assert rc == 0
+    assert seen["ui"] == "ptui"                 # default TTY view is the REPL
     assert seen["spec"].findings_out == "/tmp/out.json"
     assert seen["spec"].feed is False
 
     args2 = _args(["scan", ".", "-f", "text"])
     cli_mod._run_tui_wrap(args2, ["scan", ".", "-f", "text"])
     assert seen["spec"].findings_out is None
+
+    # --curses selects the classic curses view
+    args3 = _args(["scan", ".", "--curses"])
+    rc3 = cli_mod._run_tui_wrap(args3, ["scan", ".", "--curses"])
+    assert rc3 == 0 and seen["ui"] == "curses"
 
 
 # -- cmd_report ----------------------------------------------------------

@@ -14,3 +14,7 @@ tree-sitter-c-sharp>=0.21.0
 # For downloading benchmark sets
 requests>=2.25.0   # For downloading benchmarks from web sources
 zstandard>=0.22.0  # For extracting SMT-LIB .tar.zst archives
+
+# For the PentestGPT-style interactive interface (velora.ptui)
+prompt-toolkit>=3.0.0
+rich>=13.0.0
