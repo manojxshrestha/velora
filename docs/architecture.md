@@ -41,7 +41,92 @@ connected by a single CLI over a shared findings file.
 The **solver** (`velora solve / check / repl`) is independent of the scan loop
 and never touches the LLM layer.
 
-## 2. Repository map
+## 2. Why Velora — what sets it apart
+
+Security tooling in this space falls into four shapes, each leaving a
+different gap:
+
+| Category | Strength | Gap it leaves |
+|---|---|---|
+| Pattern / dataflow linters | fast, cheap, CI-friendly | shallow reasoning: no heap-shape analysis, no interprocedural state, no proof that a sink is reachable — alerts arrive unranked and unproven |
+| Classic rule-pack SAST | broad rule coverage | opaque confidence, weak on polyglot repos, closed engines, and it usually stops at "here is a CSV" |
+| Pure-LLM "AI hunter" agents | flexible, fluent prose | non-deterministic: findings cannot be reproduced, confidence is a guess, tool use is often unconstrained, and the report reads well even when wrong |
+| Exploit / report generators | nice artifacts | single stage: nothing verified feeds them, success is self-graded, and no re-scan proves a fix worked |
+
+Velora is deliberately built on the seam between the deterministic and the
+generative. What that buys you, concretely:
+
+1. **A symbolic core that decides; an LLM that only proposes.** The scan
+   pipeline (frontends → SIL → analyzers → optional Z3 verification) is
+   sampling-free: the same input yields the same findings, run after run.
+   LLM tiers (`detect` / `triage`) are *additive* — every finding carries
+   provenance (`symbolic` vs `llm`), so model output can never masquerade as
+   a deterministically derived result. Pure-LLM agents cannot offer this;
+   rule packs cannot offer the generative half.
+
+2. **A separation-logic prover inside the scanner.** Memory-safety questions
+   for C/C++ are answered as entailment checks against the heap-as-array Z3
+   encoding, backed by inductive predicates, goal-directed folding, and
+   lemmas (*see The entailment checker / Predicates*). Pattern matchers
+   cannot express "does this free invalidate the shape"; language models
+   cannot *prove* it — they can only assert it. The same solver ships as
+   `velora solve / check / repl`, usable offline with no model at all.
+
+3. **Honest, evidence-weighted confidence.** Confidence is derived from
+   evidence, never stamped `1.0` without a solver witness; the verification
+   gate actually runs. The exploit agent's guidance header re-states tiers as
+   *"sound"* vs *"heuristic"* leads, and reports carry the provenance of
+   every row — so triage can prioritize instead of guessing which alerts are
+   real. Most scanners publish a single unlabeled score; most LLM agents
+   publish none at all.
+
+4. **One findings file, the whole lifecycle.** `scan → report → exploit →
+   fix → re-scan` all communicate through one findings JSON — the exploit
+   stage consumes exactly what the scan stage proved, `velora report` turns
+   it into markdown, and SARIF export drops into an existing pipeline. The
+   audit-hardened exit codes (`0/1/2/3`) are machine-readable for CI gates.
+   Competing tools are typically strong at one arrow of that chain.
+
+5. **Exploitation graded by an oracle, not by the model.** The exploit agent
+   loop terminates on the operator's `--success-check` (a shell oracle) or a
+   guarded final `VERIFIED:` claim — not on the model's own opinion that it
+   "probably worked" — under a step budget, stall nudges, and a transport
+   failure budget. You get reproducible evidence, or an honest failure.
+
+6. **Fixes must re-earn their status.** `velora fix` applies an LLM patch
+   only under realpath containment against `--source`, then re-scans; a fix
+   is reported as verified only if the re-scan agrees. The loop closes with
+   the same evidence discipline as detection.
+
+7. **Agent plumbing hardened against hostile input — by construction.**
+   Findings fields are fenced as untrusted data before reaching prompts;
+   `read_file`/`grep` are repo-confined; the shell tool is operator-launched
+   and target-host allow-listed; the local bridge speaks bearer-token auth
+   with Host/Origin checks; `--stop` verifies process identity before any
+   kill (*see Trust boundaries*). Scanned code and model output are treated
+   as attacker-influenced — the usual failure mode of "AI pentester" tools
+   is prompt injection through the very files being scanned.
+
+8. **Your models, your infrastructure, no lock-in.** Any OpenAI-compatible
+   endpoint (`--base-url` / `VELORA_LLM_*` / `--model` / config file), a
+   zero-key fallback through the local opencode bridge (`velora
+   serve-bridge`), and `velora doctor` / `setup` to diagnose it. The
+   symbolic side needs no network, no API key, and collects no telemetry.
+
+9. **Operational honesty as a feature.** Documented exit codes, clean stderr
+   instead of tracebacks, an unconditional notice when `--ai` is requested
+   but unconfigured, docs kept in sync with the code, and a suite of **2647 pytest
+   cases + 18 Node bridge tests** with CI installing from `pyproject.toml`
+   only. Claims in the docs are pinned by regression tests rather than
+   asserted.
+
+**When *not* to reach for Velora:** style linting, a quick syntax check, or
+brainstorming prose — a linter or a bare chat model does that faster. Reach
+for Velora when you need ranked findings with provenance you can audit,
+reproducible symbolic results, agent-driven exploitation backed by
+evidence, and patches that are verified rather than promised.
+
+## 3. Repository map
 
 ```
 velora/
@@ -78,10 +163,10 @@ velora/
 └── __main__.py     # python -m velora
 ```
 
-Test suite: `tests/` — 2579 tests, ~69% line coverage (gaps: see the audit
+Test suite: `tests/` — 2647 tests, ~69% line coverage (gaps: see the audit
 report; SL-COMP collection files currently collect 0 tests).
 
-## 3. The entailment checker (solve path)
+## 4. The entailment checker (solve path)
 
 ```
 "P |- Q" string
@@ -123,7 +208,7 @@ consistently. **Do not trust:** wand-consequent elimination on internal
 (string-parser-unreachable) paths — a separate soundness item that remains
 open (`docs/api.md` DOC-004 notes the CLI does not parse `-*`).
 
-## 4. Heap-as-array encoding
+## 5. Heap-as-array encoding
 
 Per Piskac–Wies–Zufferey (2013), as documented in `docs/api.md`:
 
@@ -135,7 +220,7 @@ Per Piskac–Wies–Zufferey (2013), as documented in `docs/api.md`:
 - Optional `rank : Loc → Int` constraints prune cyclic models for
   single-field structures (`use_acyclicity_constraints`).
 
-## 5. Predicates, folding, lemmas
+## 6. Predicates, folding, lemmas
 
 Three deliberately separate mechanisms:
 
@@ -148,7 +233,7 @@ Three deliberately separate mechanisms:
 Lemmas never synthesise; folding never pattern-matches proven facts. New
 "proven transformations" go in `lemmas/`, new "shape synthesis" in `folding/`.
 
-## 6. The scanner (scan path)
+## 7. The scanner (scan path)
 
 ```
 velora scan PATH
@@ -187,7 +272,7 @@ verification step runs (BUG-004 fixed — its crash silently disabled it) and
 confidence is evidence-weighted rather than stamped `1.0` by fiat (BUG-005
 fixed), so `symbolic` means "symbolically derived and solver-adjudicated".
 
-## 7. LLM layer
+## 8. LLM layer
 
 - **Transport** (`llm_client.py`): OpenAI-style `POST /chat/completions`;
   retries with backoff, timeouts (`VELORA_LLM_TIMEOUT`=120 s plain,
@@ -217,7 +302,7 @@ fixed), so `symbolic` means "symbolically derived and solver-adjudicated".
 See [`docs/agent.md`](agent.md) for prompts, termination rules, and failure
 handling.
 
-## 8. CLI surface
+## 9. CLI surface
 
 | Command | Entry | Notes |
 |---|---|---|
@@ -240,14 +325,14 @@ now wired (BUG-016): `--unfold-depth` reaches `predicate_registry.max_unfold_dep
 `--in-place --diff` writes and prints the patch, and `--repo-scale` is registered
 on the installed `velora scan` parser.
 
-## 9. Interactive views
+## 10. Interactive views
 
 - **Line view (default on TTY)**: prompt-toolkit + rich (`velora/ptui/`),
-  dependency gap tracked as BUG-021.
+  both declared as core dependencies (BUG-021 fixed).
 - **Curses view**: `velora/tui/` (`--curses`).
 - **REPL**: `velora repl` — parser-level, prints verdicts, no LLM.
 
-## 10. Trust boundaries
+## 11. Trust boundaries
 
 ```
                     ┌─ untrusted ─────────────────────────────┐
@@ -282,7 +367,7 @@ Rules the code must enforce (enforced as noted):
    target-host allow-listed with findings fenced as untrusted data
    (BUG-008 mitigated).
 
-## 11. Timeouts & budgets
+## 12. Timeouts & budgets
 
 | Layer | Knob | Default |
 |---|---|---|
@@ -293,16 +378,18 @@ Rules the code must enforce (enforced as noted):
 | Tool execution | `--exec-timeout` | 120 s |
 | Exploit budget | `--max-steps` | 250 |
 
-## 12. Testing architecture
+## 13. Testing architecture
 
-- Unit tests per module (`tests/test_*.py`, 2579 tests, ~69% line coverage).
+- Unit tests per module (`tests/test_*.py`, 2647 tests, ~69% line coverage).
 - SL-COMP collection files exist for divisions but currently collect **0**
   tests (audit gap — wire or delete).
-- CI (`.github/workflows/tests.yml`): pytest on push/PR; missing
-  `permissions:` / `timeout-minutes:` / dependency pinning (audit gap).
-- Node bridge tests: `cd velora/_bridge && node --test server.test.js` (13/13).
+- CI (`.github/workflows/tests.yml`): pytest on push/PR plus a
+  `pyproject-install` job (Python 3.10, installs `.[all,dev]` from
+  `pyproject.toml` only — BUG-021 fixed); `permissions:` /
+  `timeout-minutes:` still absent (open gap).
+- Node bridge tests: `cd velora/_bridge && node --test server.test.js` (18/18).
 
-## 13. Extension points
+## 14. Extension points
 
 | Want to… | Touch |
 |---|---|
@@ -314,9 +401,9 @@ Rules the code must enforce (enforced as noted):
 | new fold pattern | `heap/_fold_proposals.py` + `folding/` |
 | new model endpoint | OpenAI-compatible only; `--base-url` / `VELORA_LLM_BASE_URL` |
 
-## 14. Known soundness caveats (pointer)
+## 15. Known soundness caveats (pointer)
 
-This document's §3 and §6 flag each trust caveat inline. Status after the
+This document's §4 and §7 flag each trust caveat inline. Status after the
 October 2026 remediation (regression tests in
 `tests/test_bugfix_regressions.py`):
 
@@ -333,7 +420,7 @@ October 2026 remediation (regression tests in
   (string-parser-unreachable) paths can produce false VALIDs — tracked as a
   separate item; the CLI does not parse `-*` (`docs/api.md` DOC-004).
 
-## 15. Design references
+## 16. Design references
 
 - Reynolds, O'Hearn — separation logic (spatial entailment).
 - Piskac, Wies, Zufferey — *Guiding Dynamic Symbolic Execution toward layout
@@ -343,7 +430,7 @@ October 2026 remediation (regression tests in
   literal cyclic proofs).
 - SL-COMP / SMT-LIB benchmark suites — evaluation harness (`benchmarks/`).
 
-## 16. Glossary
+## 17. Glossary
 
 | Term | Meaning |
 |---|---|
