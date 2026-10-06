@@ -303,20 +303,41 @@ class SatisfiabilityChecker:
         equalities = []
         inequalities = []
         points_to = []
+        # Pairs of PointsTo separated by at least one '*' (SepConj):
+        # only those pairs can collide (disjointness). Cells joined by '&'
+        # hold on the same heap and are NOT contradictory per se
+        # (e.g. `x |-> y & x |-> y` is SATISFIABLE).
+        sep_pairs = set()
 
         def extract(f):
+            """Collect atoms; return the list of PointsTo nodes in this subtree."""
             if isinstance(f, Eq):
                 equalities.append((f.left, f.right))
+                return []
             elif isinstance(f, Neq):
                 inequalities.append((f.left, f.right))
+                return []
             elif isinstance(f, PointsTo):
                 points_to.append(f)
+                return [f]
             elif isinstance(f, (And, SepConj)):
-                extract(f.left)
-                extract(f.right)
+                left_pts = extract(f.left)
+                right_pts = extract(f.right)
+                if isinstance(f, SepConj) and left_pts and right_pts:
+                    for lp in left_pts:
+                        for rp in right_pts:
+                            i1, i2 = id(lp), id(rp)
+                            sep_pairs.add((i1, i2) if i1 < i2 else (i2, i1))
+                return left_pts + right_pts
             # Don't extract from Or - those are handled by _check_or_all_branches_contradict
+            return []
 
         extract(formula)
+
+        def _separated(pt1, pt2) -> bool:
+            """True iff the two PointsTo are separated by some '*'."""
+            i1, i2 = id(pt1), id(pt2)
+            return ((i1, i2) if i1 < i2 else (i2, i1)) in sep_pairs
 
         # Build equivalence classes for transitivity and aliasing checks
         eq_classes = self._build_equivalence_classes(equalities)
@@ -344,10 +365,15 @@ class SatisfiabilityChecker:
         # Self-loops are already checked above (lines 175-180).
         # DO NOT re-add general cycle detection without careful consideration!
 
-        # Check for aliasing violations in separating conjunction
+        # Check for aliasing violations in separating conjunction (P * Q only).
+        # Cells joined by '&' share one heap: same location is not a
+        # contradiction (x |-> y & x |-> y is SAT; x |-> 5 & x |-> 3 is
+        # UNSAT but only Z3 can tell from the values).
         if len(points_to) >= 2:
             for i, pto1 in enumerate(points_to):
                 for pto2 in points_to[i+1:]:
+                    if not _separated(pto1, pto2):
+                        continue
                     # Check if both point from the same location
                     if self._exprs_equal(pto1.location, pto2.location):
                         if self.verbose:
@@ -355,9 +381,12 @@ class SatisfiabilityChecker:
                         return True
 
         # Check for aliasing through equalities (eq_classes already built above)
-        # Check if aliased locations point to different values
+        # Only for cells separated by '*': equal locations under '*' overlap
+        # their domains regardless of the stored values.
         for i, pto1 in enumerate(points_to):
             for pto2 in points_to[i+1:]:
+                if not _separated(pto1, pto2):
+                    continue
                 # Check if locations are in same equivalence class
                 if self._in_same_eq_class(pto1.location, pto2.location, eq_classes):
                     # Same location (through equality) pointing to different values
@@ -420,20 +449,37 @@ class SatisfiabilityChecker:
         equalities = []
         inequalities = []
         points_to = []
+        sep_pairs = set()
 
         def extract(f):
+            """Collect atoms; return the list of PointsTo nodes in this subtree."""
             if isinstance(f, Eq):
                 equalities.append((f.left, f.right))
+                return []
             elif isinstance(f, Neq):
                 inequalities.append((f.left, f.right))
+                return []
             elif isinstance(f, PointsTo):
                 points_to.append(f)
+                return [f]
             elif isinstance(f, (And, SepConj)):
-                extract(f.left)
-                extract(f.right)
+                left_pts = extract(f.left)
+                right_pts = extract(f.right)
+                if isinstance(f, SepConj) and left_pts and right_pts:
+                    for lp in left_pts:
+                        for rp in right_pts:
+                            i1, i2 = id(lp), id(rp)
+                            sep_pairs.add((i1, i2) if i1 < i2 else (i2, i1))
+                return left_pts + right_pts
             # Don't recurse into Or - we're checking a single branch
+            return []
 
         extract(branch)
+
+        def _separated(pt1, pt2) -> bool:
+            """True iff the two PointsTo are separated by some '*'."""
+            i1, i2 = id(pt1), id(pt2)
+            return ((i1, i2) if i1 < i2 else (i2, i1)) in sep_pairs
 
         # Build equivalence classes for this branch
         eq_classes = self._build_equivalence_classes(equalities)
@@ -443,23 +489,24 @@ class SatisfiabilityChecker:
             if self._in_same_eq_class(neq_left, neq_right, eq_classes):
                 return True
 
-        # Check for self-loops
-        for pto in points_to:
-            if isinstance(pto.location, Var):
-                for val in pto.values:
-                    if isinstance(val, Var) and val.name == pto.location.name:
-                        return True
+        # NOTE: self-loops (x |-> x) are NOT contradictions here either --
+        # same rationale as in has_obvious_contradiction (see the comment
+        # there): a cell may hold its own address.
 
-        # Check for aliasing violations
+        # Check for aliasing violations (only cells separated by '*')
         if len(points_to) >= 2:
             for i, pto1 in enumerate(points_to):
                 for pto2 in points_to[i+1:]:
+                    if not _separated(pto1, pto2):
+                        continue
                     if self._exprs_equal(pto1.location, pto2.location):
                         return True
 
-        # Check for aliasing through equalities
+        # Check for aliasing through equalities (only cells separated by '*')
         for i, pto1 in enumerate(points_to):
             for pto2 in points_to[i+1:]:
+                if not _separated(pto1, pto2):
+                    continue
                 if self._in_same_eq_class(pto1.location, pto2.location, eq_classes):
                     if not all(self._in_same_eq_class(v1, v2, eq_classes)
                               for v1 in pto1.values for v2 in pto2.values):

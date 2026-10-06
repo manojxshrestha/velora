@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // OpenAI-compatible bridge exposing opencode's provider catalog to Velora.
 // Velora holds no API keys: opencode owns auth and (free) model access.
+import crypto from "node:crypto";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
@@ -276,10 +277,104 @@ export async function handleChat(client, body, enabled) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Request guard (loopback-only + optional session token).
+//
+// The bridge speaks OpenAI to anything that can reach 127.0.0.1:<port>. Three
+// checks keep it ours (BUG-013):
+//   1. Host must be loopback -- blocks DNS rebinding (evil.example resolving
+//      to 127.0.0.1 still sends `Host: evil.example`).
+//   2. Origin, when present, must be loopback -- blocks browser pages on other
+//      origins from issuing cross-origin requests. Non-browser clients (our
+//      own urllib calls, curl) send no Origin and pass.
+//   3. When a session token is configured, Authorization must be exactly
+//      `Bearer <token>` -- only processes that read our 0600 state file (or
+//      the env var we export) know it. Compared in constant time.
+// ---------------------------------------------------------------------------
+
+const LOOPBACK_HOST_RE = /^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|\[::1\]|::1)$/i;
+
+export function requestHostname(hostHeader) {
+  const h = String(hostHeader || "");
+  if (h.startsWith("[")) {
+    const close = h.indexOf("]");
+    return (close === -1 ? h : h.slice(0, close + 1)).toLowerCase();
+  }
+  const colon = h.lastIndexOf(":");
+  return (colon === -1 ? h : h.slice(0, colon)).toLowerCase();
+}
+
+function originAllowed(origin) {
+  if (origin === undefined || origin === null || origin === "") return true;
+  if (origin === "null") return false; // opaque/sandboxed origin: never loopback
+  try {
+    return LOOPBACK_HOST_RE.test(new URL(String(origin)).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function tokenMatches(gotHeader, wantHeader) {
+  const a = Buffer.from(String(gotHeader));
+  const b = Buffer.from(String(wantHeader));
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+// Returns null when the request may proceed, else {status, body}.
+export function guardRequest(req, opts = {}) {
+  const headers = (req && req.headers) || {};
+  const token = typeof opts.token === "string" && opts.token ? opts.token : "";
+  const host = String(headers.host || "");
+  if (!LOOPBACK_HOST_RE.test(requestHostname(host))) {
+    return {
+      status: 403,
+      body: {
+        error: {
+          message: `forbidden: bridge only serves loopback clients (Host: ${host || "<missing>"})`,
+          type: "bridge_error",
+          code: "forbidden_host",
+        },
+      },
+    };
+  }
+  if (!originAllowed(headers.origin)) {
+    return {
+      status: 403,
+      body: {
+        error: {
+          message: `forbidden: cross-origin request rejected (Origin: ${headers.origin})`,
+          type: "bridge_error",
+          code: "forbidden_origin",
+        },
+      },
+    };
+  }
+  if (token && !tokenMatches(String(headers.authorization || ""), `Bearer ${token}`)) {
+    return {
+      status: 401,
+      body: {
+        error: {
+          message: "missing or invalid bridge token (send Authorization: Bearer <token>)",
+          type: "bridge_error",
+          code: "unauthorized",
+        },
+      },
+    };
+  }
+  return null;
+}
+
 export async function startBridge(options = {}) {
   const bridgePort = Number(options.port ?? DEFAULT_BRIDGE_PORT);
   const opencodePort = Number(options["opencode-port"] ?? options.opencodePort ?? DEFAULT_OC_PORT);
   const enabled = options.tools === "off" ? false : true;
+  // Session token: --token beats VELORA_BRIDGE_TOKEN beats none (raw
+  // `node server.js` dev runs stay open; `velora serve-bridge` always sets it).
+  const token = (typeof options.token === "string" && options.token)
+    ? options.token
+    : ((typeof process.env.VELORA_BRIDGE_TOKEN === "string" && process.env.VELORA_BRIDGE_TOKEN)
+      ? process.env.VELORA_BRIDGE_TOKEN : "");
   // opencode + every hand-connected provider (auth.json); on read failure
   // this is just ["opencode"] and the bridge behaves exactly as before.
   const providers = enabledProviders();
@@ -322,6 +417,11 @@ export async function startBridge(options = {}) {
       res.writeHead(status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(payload));
     };
+    const denied = guardRequest(req, { token });
+    if (denied) {
+      req.resume(); // drain any body we are about to ignore
+      return send(denied.status, denied.body);
+    }
     if (!route) {
       const e = openaiError(404, `unknown route: ${key}`, "invalid_request_error", "not_found");
       return send(e.status, e.body);

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -160,22 +161,44 @@ def substitute(value: str, config_dir: Path) -> str:
 # Discovery
 # ---------------------------------------------------------------------------
 
+# Dedupe for the project-config trust warning (once per path per process).
+_repo_config_warned: set[str] = set()
+
+
+def _warn_repo_config(path: Path) -> None:
+    if path in _repo_config_warned:
+        return
+    _repo_config_warned.add(path)
+    print(
+        f"[velora] WARNING: using project-local opencode config {path} "
+        "(found by walking up from the current directory). Project config "
+        "can redirect API endpoints and expand {env:VAR}/{file:path} "
+        "substitutions into the request Authorization header. Set "
+        "OPENCODE_CONFIG to a file you trust to ignore project config.",
+        file=sys.stderr,
+    )
+
+
 def config_candidates(start: Optional[Path] = None) -> List[Path]:
     """OPENCODE_CONFIG, global config, then nearest project opencode.json[c]
-    walking up from `start` (cwd by default) -- opencode's documented order.
-    A set OPENCODE_CONFIG is authoritative (replaces the global config), which
-    also gives tests a hermetic hook."""
-    out: List[Path] = []
+    walking up from `start` (cwd by default) -- opencode's documented order,
+    with one deliberate hardening over stock opencode (BUG-012): a set
+    ``OPENCODE_CONFIG`` is *fully* authoritative and disables the project
+    (cwd-walk) search entirely, so a cloned repo's ``opencode.json`` can never
+    redirect the endpoint or expand ``{env:}``/``{file:}`` substitutions when
+    the operator pinned a config. Without ``OPENCODE_CONFIG``, a discovered
+    project config is still honoured (opencode parity) but announced loudly
+    on stderr before use."""
     env_cfg = os.environ.get("OPENCODE_CONFIG")
     if env_cfg:
-        out.append(Path(env_cfg).expanduser())
-    else:
-        home = Path.home()
-        for name in ("opencode.json", "opencode.jsonc"):
-            p = home / ".config" / "opencode" / name
-            if p.exists():
-                out.append(p)
-                break
+        return [Path(env_cfg).expanduser()]
+    out: List[Path] = []
+    home = Path.home()
+    for name in ("opencode.json", "opencode.jsonc"):
+        p = home / ".config" / "opencode" / name
+        if p.exists():
+            out.append(p)
+            break
     cur = (start or Path.cwd()).resolve()
     found: Optional[Path] = None
     for directory in [cur, *cur.parents]:
@@ -188,6 +211,7 @@ def config_candidates(start: Optional[Path] = None) -> List[Path]:
             break
     if found:
         out.append(found)
+        _warn_repo_config(found)
     return out
 
 

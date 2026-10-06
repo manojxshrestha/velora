@@ -60,8 +60,15 @@ class Z3Encoder:
         self.rank = z3.Function('rank', self.LocSort, z3.IntSort())
         # Counter for fresh heap IDs
         self.heap_counter = 0
-        # Flag to enable/disable acyclicity constraints (default: enabled)
-        self.use_acyclicity_constraints = True
+        # Flag to enable/disable acyclicity (rank) constraints.
+        # Default: DISABLED. Cyclic heaps (e.g., x |-> y * y |-> x) are
+        # satisfiable in standard separation logic; forcing acyclicity on raw
+        # points-to cells made cyclic antecedents UNSAT in the entailment path,
+        # wrongly discharging `cyclic |- false` as valid. This matches the SAT
+        # path (see checking/_satisfiability_check.py), which explicitly
+        # disables acyclicity for the same reason. Rank remains available for
+        # callers that want the stronger (non-standard) acyclic-heap semantics.
+        self.use_acyclicity_constraints = False
 
         # Spatial encoder (delegate for spatial formula encoding)
         self._spatial_encoder = SpatialEncoder(self)

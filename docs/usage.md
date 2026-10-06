@@ -27,7 +27,7 @@ velora scan . --ai                                                # 5. confirm i
 
 Pipes work too (`-` = stdin): `velora scan . -f json | velora exploit --guidance - --target https://target.com --goal '…'`.
 
-Exit codes everywhere: **`0`** = success/proven/clean · **`1`** = findings / invalid / not solved · **`2`** = usage error or LLM unreachable.
+Exit codes everywhere: **`0`** = success/proven/clean · **`1`** = findings / invalid / not solved / tool error · **`2`** = LLM unreachable (clean `error: ...` on stderr, no traceback; argparse usage errors also exit `2`) · **`3`** = scan I/O errors (files the scanner could not read — `Scan error: ...` on stderr; the JSON/SARIF payload is still printed).
 
 ## Command pack: black-box, white-box & enterprise
 
@@ -45,7 +45,7 @@ velora models use opencode-bridge/opencode/mimo-v2.6-flash-free --no-prompt
 # one-time 3/3: one real round-trip -- exit 0 = ready (any mode, run once)
 velora doctor --probe
 
-# runs A-E are standalone: --target in, verdict out (exit 0 solved / 1 not solved / 2 unreachable)
+# runs A-E are standalone: --target in, verdict out (exit 0 solved / 1 not solved or unreachable)
 
 # run A: recon -- target in, surface mapped, one flaw probed -> exit 0 = verified win
 velora exploit --target https://target.com --goal 'map the application surface (pages, forms, parameters) and probe them for one high-confidence flaw' --max-steps 20
@@ -109,7 +109,7 @@ velora exploit --target https://target.com --scope scope.txt --login-url https:/
 
 - **`--success-check`** is the authoritative oracle: re-run after every step, exit 0 = solved — a model claim can never fake it.
 - **`--format json --trace-out`** keeps the machine-readable summary plus the full transcript for the report.
-- **Exit codes:** `0` = proven/solved/clean · `1` = invalid findings/not solved · `2` = usage/LLM unreachable.
+- **Exit codes:** `0` = proven/solved/clean · `1` = invalid findings/not solved · `2` = LLM unreachable (clean `error: ...` on stderr, no traceback) or usage error.
 
 ## Scan
 
@@ -125,9 +125,9 @@ velora scan . --ai                               # symbolic + AI layer (needs a 
 velora scan ./misc -l go --ai                    # force a language for odd extensions
 ```
 
-- `--fail-on <critical|high|medium|low|any|none>` — severity threshold that makes the command **exit 1** (default `high`); `none` = always exit 0.
-- `-f/--format`: `text` (default), `json` (input for `exploit`/`fix`), `sarif` (GitHub code scanning). `-o` writes to a file.
-- `--min-severity` hides small findings; `--no-verify` skips verification (faster, more false positives); `--timeout <ms>` per-check solver budget (default 5000); `-v` verbose.
+- `--fail-on <critical|high|medium|low|any|none>` — severity threshold that makes the command **exit 1** (default `high`); `none` = findings never fail the run (unreadable-file errors still exit `3`).
+- `-f/--format`: `text` (default), `json` (input for `exploit`/`fix`), `sarif` (GitHub code scanning). `-o` writes to a file, **overwriting** a previous report (one report per run, every format).
+- `--min-severity <sev>` drops findings below `<sev>` — applied once before formatting, so text, `json`, and `sarif` always expose the same finding set (and the exit gate matches the artifact); `--no-verify` skips verification (faster, more false positives); `--timeout <ms>` per-check solver budget (default 5000); `-v` verbose.
 - Directory scans skip `.git`, `node_modules`, `.venv`, `__pycache__`, etc. — `--no-default-excludes` overrides.
 
 Symbolic scans finish in milliseconds; each `--ai` file costs one or more LLM calls (seconds to tens of seconds).
@@ -254,6 +254,7 @@ velora exploit --target https://target.com --goal '…' \
 ```bash
 velora fix examples/app.py --guidance findings.json --diff         # preview: unified diff, writes nothing
 velora fix examples/app.py --guidance findings.json --in-place     # apply: write, then re-scan to verify
+velora fix examples/app.py --guidance findings.json --in-place --diff   # apply and show the diff it wrote
 ```
 
 ```text
@@ -262,7 +263,7 @@ CWE-89 app.py:20 -> patched (verified✓)
 ```
 
 - Per finding: `patched (verified✓)` (fixed, proof) · `patched (STILL DETECTED)` (incomplete) · `verify-skipped` (`--no-verify`) · `could not apply`.
-- Flags: `--guidance` (required), `--diff` / `--in-place`, `--no-verify`, `--format json`, `--model <id>`.
+- Flags: `--guidance` (required), `--diff` (preview) / `--in-place` (write) — `--in-place --diff` writes **and** prints the unified diff — `--no-verify`, `--format json`, `--model <id>`.
 - **Exit:** 0 when at least one patch was applied, 1 otherwise.
 
 After `--in-place`, `velora scan` again — fixed findings disappear.
@@ -288,6 +289,14 @@ velora serve-bridge --status                  # daemon health (exit 0 when healt
 velora serve-bridge --stop                    # stop it
 ```
 
+The bridge is authenticated: `--start` mints a random bearer token (kept in the
+environment of the daemon and in a `0600` state file), every route requires
+`Authorization: Bearer <token>` (401 without/with a wrong token), and requests
+with a non-loopback `Host` or a foreign `Origin` are rejected (403 — DNS-rebinding
+and browser cross-origin abuse). Velora's own clients read the token from the
+state file automatically; you never pass it by hand. Raw `node server.js` runs
+stay unauthenticated (no token configured).
+
 **Model not responding** (`no response from the model`, `model unreachable`, `doctor` exits 1) → the bridge daemon is down:
 
 ```bash
@@ -309,7 +318,7 @@ Velora's soundness core, exposed directly — pure Z3, **no model, no setup**: y
 velora solve "ls(x, y) * ls(y, z) * x != z |- ls(x, z)"    # -> ✓ VALID (exit 0) / ✗ INVALID (exit 1)
 ```
 
-Flags: `--model` prints a countermodel when invalid, `-v` shows solving steps, `--timeout <ms>` (default 5000), `--unfold-depth <n>` (default 3), `--format json`.
+Flags: `--model` prints a countermodel when invalid, `-v` shows solving steps, `--timeout <ms>` (default 5000), `--unfold-depth <n>` (reaches the checker's predicate registry; default = the checker's own, 6 — raise for deeply nested predicates), `--format json`.
 
 ### `velora check` — batch-check a file
 
@@ -344,9 +353,9 @@ One CLI for the whole workflow plus the solver. `velora <command> --help` prints
 
 | Command | What it does |
 |---------|--------------|
-| `velora scan <path>` | Scan local source (`<path>` = file or directory) for vulnerabilities. Symbolic by default; `--ai` adds the LLM layer. `-f json\|sarif`, `-o`, `--fail-on <sev>` (default `high`), `--pattern`, `-l`. |
+| `velora scan <path>` | Scan local source (`<path>` = file or directory) for vulnerabilities. Symbolic by default; `--ai` adds the LLM layer (a missing endpoint is reported on stderr, not silently skipped). `-f json\|sarif`, `-o` (overwrites), `--fail-on <sev>` (default `high`), `--min-severity <sev>` (all formats + exit gate), `--repo-scale`, `--pattern`, `-l`. Exit `3` on unreadable files. |
 | `velora exploit --target <url>` | Agent against a live, authorized target. `--goal`, `--success-check`, `--guidance <findings.json\|->`, `--max-steps`, `--exec-timeout`, `--trace-out`, `--format json`. Exit 0 = verified success. |
-| `velora fix <path>` | Patch each finding, then re-scan to prove it's gone. `--guidance` (required), `--diff` / `--in-place`, `--no-verify`, `--format json`. Exit 0 when ≥1 patch applied. |
+| `velora fix <path>` | Patch each finding, then re-scan to prove it's gone. `--guidance` (required), `--diff` / `--in-place` (`--in-place --diff` = write + show), `--no-verify`, `--format json`. Exit 0 when ≥1 patch applied. |
 
 ### AI / setup
 

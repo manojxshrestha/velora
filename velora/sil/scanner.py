@@ -207,6 +207,34 @@ class BufferSizeTracker:
 from velora.sil.translator import SILTranslator, VulnerabilityCheck, VulnType
 from velora.checking.incorrectness import IncorrectnessChecker, BugReport, BugWitness
 
+# Vulnerability types whose reachability claim comes from the front-end taint
+# walk rather than a Z3 incorrectness query. Deliberately module-level (bugfix
+# BUG-004): the original set was built inside _verify_check() from a literal
+# that referenced nonexistent members (CRYPTO_WEAK_HASH, CRYPTO_WEAK_CIPHER,
+# CRYPTO_WEAK_RANDOM, TRUST_BOUNDARY), so the AttributeError fired while
+# *building* the set -- every _verify_check() call crashed and the broad
+# `except` in _process_check() silently downgraded the result, disabling the
+# scanner's central soundness control on every run. At import time a renamed
+# or removed enum member now fails loudly instead.
+TAINT_VERIFIED_VULNTYPES: FrozenSet[VulnType] = frozenset({
+    VulnType.SQL_INJECTION,
+    VulnType.XSS,
+    VulnType.COMMAND_INJECTION,
+    VulnType.PATH_TRAVERSAL,
+    VulnType.SSRF,
+    VulnType.LDAP_INJECTION,
+    VulnType.XPATH_INJECTION,
+    VulnType.WEAK_HASH,                # was: nonexistent CRYPTO_WEAK_HASH
+    VulnType.WEAK_CRYPTOGRAPHY,        # was: nonexistent CRYPTO_WEAK_CIPHER
+    VulnType.INSECURE_RANDOM,          # was: nonexistent CRYPTO_WEAK_RANDOM
+    VulnType.INSECURE_COOKIE,
+    VulnType.INSECURE_COOKIE_HTTPONLY,
+    VulnType.CSRF,
+    VulnType.TRUST_BOUNDARY_VIOLATION,  # was: nonexistent TRUST_BOUNDARY
+    VulnType.SENSITIVE_DATA_EXPOSURE,
+    VulnType.IDOR,
+})
+
 
 # NOTE: the per-language regex pattern layer was removed. Detection is now
 # performed entirely by the separation-logic taint engine, the Tier-2 SIL
@@ -1072,8 +1100,17 @@ class VeloraScanner:
             self.language = detected_lang
             self.frontend = self._get_frontend(detected_lang)
 
-        # Use utf-8-sig to automatically strip BOM (common in C# files)
-        source_code = path.read_text(encoding='utf-8-sig')
+        # Use utf-8-sig to automatically strip BOM (common in C# files).
+        # Mixed-encoding trees (typical C/C++) must not abort a scan: a decode
+        # failure falls back to replacement characters and is recorded on the
+        # result instead of raising (BUG-006: the original read_text()
+        # had no errors=, so a single latin-1 byte crashed the whole run).
+        decode_error: Optional[str] = None
+        try:
+            source_code = path.read_text(encoding='utf-8-sig')
+        except UnicodeDecodeError as e:
+            decode_error = str(e)
+            source_code = path.read_text(encoding='utf-8-sig', errors='replace')
 
         # Minified and generated artifacts are not source: they are build output,
         # they are never the file a security advisory points at, and analysing them
@@ -1086,7 +1123,12 @@ class VeloraScanner:
                 "Skipped: file looks generated or minified (extremely long lines)")
             return result
 
-        return self.scan(source_code, str(path))
+        result = self.scan(source_code, str(path))
+        if decode_error:
+            result.errors.append(
+                f"Source is not valid UTF-8 (decoded with replacement "
+                f"characters): {decode_error}")
+        return result
 
     @staticmethod
     def _is_excluded_dir_member(
@@ -1191,7 +1233,13 @@ class VeloraScanner:
                     continue
                 if self._is_excluded_dir_member(filepath, dir_path, excluded_dirs):
                     continue
-                result = self.scan_file(str(filepath))
+                try:
+                    result = self.scan_file(str(filepath))
+                except Exception as e:
+                    # One bad file must not abort the whole directory scan
+                    # (BUG-006): capture the failure and keep going.
+                    result = ScanResult(filename=str(filepath))
+                    result.errors.append(f"Scan error: {e}")
                 results.append(result)
         finally:
             self.llm_detect = per_file_detect
@@ -1285,6 +1333,7 @@ class VeloraScanner:
 
         verified = False
         verification_failed = False
+        verify_confidence: Optional[float] = None
         if self.verify and self.checker:
             # Verify using incorrectness logic
             # Key insight: incorrectness logic proves bugs ARE reachable
@@ -1296,6 +1345,7 @@ class VeloraScanner:
 
                 if report.reachable:
                     verified = True
+                    verify_confidence = report.confidence
                     # Extract witness
                     if report.witness:
                         witness_str = str(report.witness)
@@ -1315,12 +1365,19 @@ class VeloraScanner:
         severity = self.SEVERITY_MAP.get(check.vuln_type, Severity.MEDIUM)
         cwe_id = self.CWE_MAP.get(check.vuln_type)
 
-        # Set confidence based on verification status
-        # - verified: highest confidence (formal proof of reachability)
-        # - verification error: medium confidence (taint analysis found it, verification had issues)
+        # Set confidence based on verification evidence:
+        # - reachable WITH a Z3 witness: formal proof of reachability (1.0)
+        # - reachable WITHOUT a witness (taint walk / unknown type): the
+        #   analysis found it, but nothing was proved -- capped below 1.0
+        #   (BUG-005: no solver witness, no confidence of 1.0)
+        # - verification error: medium confidence (taint analysis found it,
+        #   verification had issues)
         # - no verification mode: lower confidence
-        if verified:
-            confidence = 1.0
+        if verified and witness_str:
+            confidence = verify_confidence if verify_confidence is not None else 1.0
+        elif verified:
+            confidence = min(verify_confidence if verify_confidence is not None
+                             else 0.8, 0.85)
         elif verification_failed:
             confidence = 0.7  # Verification had errors, but taint analysis found it
         else:
@@ -1556,45 +1613,31 @@ class VeloraScanner:
         return filtered
 
     def _verify_check(self, check: VulnerabilityCheck) -> BugReport:
-        """Verify vulnerability check using Velora's incorrectness checker
+        """Verify vulnerability check using Velora's incorrectness checker.
 
-        Note: Incorrectness logic is designed for memory safety bugs (null deref, UAF, etc.)
-        where we can prove reachability of error states. For taint flow vulnerabilities,
-        the symbolic execution has already proven that data flows from source to sink,
-        so we mark them as verified without additional Z3 checks.
+        Memory-safety bugs (null deref, UAF, double free) go through a real Z3
+        incorrectness query; a reachable report carries a witness.
+
+        Taint-family bugs are NOT re-proved here: their reachability comes from
+        the front-end taint walk, which is the evidence for that class. They are
+        reported reachable with ``witness=None`` so callers can tell
+        "Z3-proven" apart from "taint-provenance" -- instead of the old fiat
+        that every taint finding was confidence 1.0 "verified" with zero solver
+        evidence (BUG-005, unmasked by BUG-004).
         """
         from velora.checking.incorrectness import BugReport, BugType
 
-        # Taint-based vulnerabilities: already proven through symbolic taint analysis
-        # The formula encodes Source * Taint * Sink which would fail SepConj self-composition
-        taint_based_vulns = {
-            VulnType.SQL_INJECTION,
-            VulnType.XSS,
-            VulnType.COMMAND_INJECTION,
-            VulnType.PATH_TRAVERSAL,
-            VulnType.SSRF,
-            VulnType.LDAP_INJECTION,
-            VulnType.XPATH_INJECTION,
-            VulnType.CRYPTO_WEAK_HASH,
-            VulnType.CRYPTO_WEAK_CIPHER,
-            VulnType.CRYPTO_WEAK_RANDOM,
-            VulnType.INSECURE_COOKIE,
-            VulnType.INSECURE_COOKIE_HTTPONLY,
-            VulnType.CSRF,
-            VulnType.TRUST_BOUNDARY,
-            VulnType.SENSITIVE_DATA_EXPOSURE,
-            VulnType.IDOR,
-        }
-
-        if check.vuln_type in taint_based_vulns:
-            # For taint flow: symbolic execution already proved the flow exists
-            # Mark as reachable (verified)
+        if check.vuln_type in TAINT_VERIFIED_VULNTYPES:
+            # Taint flow: proven by symbolic taint analysis only.
             return BugReport(
                 reachable=True,
                 bug_type=BugType.TAINT_FLOW,
-                description=f"Taint flow verified by symbolic execution: {check.vuln_type.value}",
+                description=(
+                    f"Taint flow found by front-end taint analysis "
+                    f"(not re-proved by Z3): {check.vuln_type.value}"
+                ),
                 witness=None,
-                confidence=1.0
+                confidence=0.85,
             )
 
         # Memory safety bugs: use full incorrectness logic
@@ -1614,13 +1657,15 @@ class VeloraScanner:
                 check.formula
             )
         else:
-            # Unknown type - mark as verified to be safe
+            # Unknown type: not verifiable by either path. Reachable so the
+            # finding is kept, but at its own low confidence -- a type the
+            # verifier does not understand must never be reported as proven.
             return BugReport(
                 reachable=True,
                 bug_type=BugType.TAINT_FLOW,
                 description=f"Unknown vulnerability type: {check.vuln_type.value}",
                 witness=None,
-                confidence=0.8
+                confidence=0.8,
             )
 
 

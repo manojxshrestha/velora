@@ -268,6 +268,12 @@ def run_agent(messages: List[Dict[str, Any]], client, *,
                     args = json.loads(fn.get("arguments") or "{}")
                 except (json.JSONDecodeError, TypeError):
                     args = {}
+                if not isinstance(args, dict):
+                    # BUG-009: a valid JSON *scalar* ("5") or list decodes
+                    # fine but has no .get(); one malformed tool call must
+                    # degrade to empty args (exec_tool answers "error: ..."
+                    # and the loop continues), never kill a whole run.
+                    args = {}
                 if progress:
                     cmd = str(args.get("cmd") or args or "")
                     cmd = " ".join(cmd.split())

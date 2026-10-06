@@ -33,7 +33,7 @@ Velora is a *neuro-symbolic* system: a proof-producing **symbolic** core and a l
 | | Symbolic core | LLM agent |
 |---|---|---|
 | Discipline | Formal methods — separation logic encoded in the Z3 SMT solver | Machine learning — a language model that reads code and drives tools |
-| Contribution | **Proves** reachability: a finding is reported only when it is mathematically verified — *sound* means zero false positives | Supplies the context formal methods cannot express — business intent, framework semantics, cross-file data flows |
+| Contribution | **Proves** entailments with Z3 (separation-logic core) and emits tier-labelled findings — `symbolic` candidates are candidates until the verification step confirms them | Supplies the context formal methods cannot express — business intent, framework semantics, cross-file data flows |
 | Limitation | Confined to what it can encode | Cannot prove; its claims stay provisional until independently checked |
 | Role in the loop | Adjudicates: proven and LLM-tier findings are never conflated, and an exploit concludes only on an observed state change or a passing shell oracle | Proposes: candidate findings, triage decisions, exploit steps |
 
@@ -45,7 +45,7 @@ Velora is a *neuro-symbolic* system: a proof-producing **symbolic** core and a l
 
 ## Highlights
 
-- **Sound by construction.** The symbolic core proves reachability with Z3 — its findings carry no false positives — and never conflates them with LLM-tier results.
+- **Proof-producing symbolic core.** Entailments are decided by Z3, and scanner findings are tier-labelled (`symbolic` vs `llm`) and never conflated; the finding-level verification gate runs on every check, and confidence is evidence-weighted (a `1.0` stamp requires a solver witness).
 - **One CLI, the whole loop.** `scan` → `exploit` → `fix`, composed over a shared findings file.
 - **Five symbolic frontends** (Python, Java, JS/TS, C/C++, C#) plus an LLM tier for any other language.
 - **Zero-key AI.** `velora setup` bootstraps a local bridge to opencode's free Zen tier — no API key is ever stored.
@@ -86,6 +86,8 @@ Everything beyond the quick start lives in [`docs/`](docs/):
 | [Detection](docs/detection.md) | Supported languages, 80+ vulnerability detectors, how detection works |
 | [AI Layer & Models](docs/ai-models.md) | LLM detection & triage, RAM & model requirements, model providers (zero-key, Zen, local) |
 | [Python API & Symbolic Core](docs/api.md) | Embedding Velora in Python; the separation-logic + Z3 foundation |
+| [Architecture](docs/architecture.md) | How the two cores fit together: module map, solve/scan data flows, trust boundaries, timeouts, extension points |
+| [The Agent](docs/agent.md) | Model precedence, prompts, tools, termination rules, failure handling, bridge security, operator checklist |
 
 ## Quick Start
 
@@ -197,7 +199,7 @@ Every command, grouped by what it's for — `velora <command> --help` prints all
 
 | Command | What it does | Typical first run |
 |---|---|---|
-| [`velora solve "<P> \|- <Q>"`](docs/usage.md#velora-solve--check-one-entailment) | Check one entailment → `✓ VALID` / `✗ INVALID` (no model needed) | `velora solve "x \|- x"` |
+| [`velora solve "<P> \|- <Q>"`](docs/usage.md#velora-solve--check-one-entailment) | Check one entailment → `✓ VALID` / `✗ INVALID` (no model needed) | `velora solve "x \|-> y \|- x \|-> y"` |
 | [`velora check <file>`](docs/usage.md#velora-check--batch-check-a-file) | Batch-check a file with one entailment per line | `velora check formulas.txt` |
 | [`velora parse "<formula>"`](docs/usage.md#velora-parse--inspect-a-formula) | Print a formula's AST (grammar debugging) | `velora parse "x \|-> y * y \|-> z"` |
 | [`velora repl`](docs/usage.md#velora-repl--interactive-checking) | Interactive REPL: type entailments, `:parse` / `:help` / `:quit` | `velora repl` |

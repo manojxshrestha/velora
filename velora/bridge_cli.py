@@ -19,12 +19,14 @@ from __future__ import annotations
 import json
 import os
 import platform as _platform
+import secrets
 import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -249,9 +251,10 @@ def _port_busy(port: int) -> bool:
 
 
 def bridge_health(port: int = DEFAULT_PORT, timeout: float = 2.0) -> bool:
+    url = f"http://127.0.0.1:{port}/health"
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health",
-                                    timeout=timeout) as resp:
+        req = urllib.request.Request(url, headers=auth_headers(url))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status == 200
     except Exception:  # noqa: BLE001
         return False
@@ -292,7 +295,13 @@ def _read_state() -> Optional[dict]:
 
 def _write_state(state: dict) -> None:
     state_dir().mkdir(parents=True, exist_ok=True)
-    pidfile_path().write_text(json.dumps(state, indent=2) + "\n")
+    path = pidfile_path()
+    path.write_text(json.dumps(state, indent=2) + "\n")
+    # The state holds the session token: owner-only (BUG-013).
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _clear_state() -> None:
@@ -300,6 +309,113 @@ def _clear_state() -> None:
         pidfile_path().unlink()
     except OSError:
         pass
+
+
+def bridge_token() -> str:
+    """Session token for velora's local bridge (BUG-013).
+
+    Precedence: VELORA_BRIDGE_TOKEN env > the token stored (0600) in the state
+    file at bridge start. Empty when neither exists (bridge started without
+    auth, e.g. a raw `node server.js` dev run)."""
+    env = os.environ.get("VELORA_BRIDGE_TOKEN", "")
+    if env:
+        return env
+    state = _read_state() or {}
+    tok = state.get("token")
+    return tok if isinstance(tok, str) else ""
+
+
+def _bridge_port() -> int:
+    state = _read_state() or {}
+    try:
+        return int(state.get("port") or 0) or DEFAULT_PORT
+    except (TypeError, ValueError):
+        return DEFAULT_PORT
+
+
+def bridge_token_for(url: str) -> str:
+    """Token to present to `url`, or "" when `url` is not velora's bridge.
+
+    Guards against leaking the bridge token to other endpoints: the URL must
+    be loopback HTTP on the port our bridge is configured/state-tracked on."""
+    token = bridge_token()
+    if not token or not url:
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return ""
+    if parts.scheme != "http":
+        return ""
+    host = (parts.hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return ""
+    try:
+        port = parts.port or 80
+    except ValueError:
+        return ""
+    return token if port == _bridge_port() else ""
+
+
+def auth_headers(url: str = "") -> Dict[str, str]:
+    """Authorization headers for requests to velora's local bridge (BUG-013).
+
+    Empty for non-bridge URLs or when no token is configured, so every caller
+    (health, models, probe, llm_client) keeps working against bridges that do
+    not require auth."""
+    tok = bridge_token_for(url) if url else ""
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
+def _pid_cmdline(pid: int) -> str:
+    """Best-effort command line of `pid` ("" when unknowable)."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+        if raw:
+            return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(["ps", "-p", str(int(pid)), "-o", "args="],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _capture_cmdline(pid: int, timeout: float = 2.0) -> str:
+    """Snapshot the just-spawned child's command line, retrying briefly past
+    the fork/exec window (a not-yet-exec'd child shows the parent's cmdline).
+    Recorded in the state file so --stop can detect pid reuse (BUG-015)."""
+    mine = _pid_cmdline(os.getpid())
+    deadline = time.time() + timeout
+    got = ""
+    while time.time() < deadline:
+        got = _pid_cmdline(pid)
+        if got and got != mine:
+            return got
+        time.sleep(0.05)
+    return got if got and got != mine else ""
+
+
+def _pid_is_bridge(pid: int, state: Optional[dict] = None) -> bool:
+    """Is `pid` still the bridge process we spawned (pid-reuse guard)?
+
+    Compares the live command line against the snapshot recorded at start;
+    falls back to a structural check (`server.js`) for legacy state files.
+    Returns True when the command line is unreadable -- preserves the old
+    kill behaviour on platforms without /proc or ps rather than stranding a
+    real bridge."""
+    current = _pid_cmdline(pid)
+    if not current:
+        return True
+    state = state if state is not None else (_read_state() or {})
+    recorded = str(state.get("cmdline") or "")
+    if recorded:
+        return current == recorded
+    return "server.js" in current
 
 
 def _pid_alive(pid: int) -> bool:
@@ -379,9 +495,11 @@ def start_bridge(args=None, launcher=None, prep=None) -> int:
         return 0
     state = _read_state()
     if state and state.get("pid") and _pid_alive(int(state["pid"])):
-        print(f"[bridge] pid {state['pid']} is alive but not healthy -- "
-              "stop it first:  velora serve-bridge --stop", file=sys.stderr)
-        return 1
+        if _pid_is_bridge(int(state["pid"]), state):
+            print(f"[bridge] pid {state['pid']} is alive but not healthy -- "
+                  "stop it first:  velora serve-bridge --stop", file=sys.stderr)
+            return 1
+        # pid was recycled by an unrelated process: stale state, not our bridge
     _clear_state()
     conflict = _check_ports(port, oc_port)
     if conflict:
@@ -389,14 +507,17 @@ def start_bridge(args=None, launcher=None, prep=None) -> int:
         return 1
 
     state_dir().mkdir(parents=True, exist_ok=True)
+    token = os.environ.get("VELORA_BRIDGE_TOKEN", "") or secrets.token_hex(32)
+    env = dict(prep["env"])
+    env["VELORA_BRIDGE_TOKEN"] = token
     cmd = _bridge_cmd(prep["node"], port, oc_port)
     if launcher is not None:
-        child = launcher(cmd, prep["env"], prep["dst"])
+        child = launcher(cmd, env, prep["dst"])
     else:
         log = open(logfile_path(), "ab")
         try:
             child = subprocess.Popen(
-                cmd, cwd=prep["dst"], env=prep["env"],
+                cmd, cwd=prep["dst"], env=env,
                 stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
@@ -404,6 +525,7 @@ def start_bridge(args=None, launcher=None, prep=None) -> int:
             log.close()
     _write_state({"pid": child.pid, "port": port, "oc_port": oc_port,
                   "node": prep["node"], "opencode": prep["opencode"],
+                  "token": token, "cmdline": _capture_cmdline(child.pid),
                   "started_at": int(time.time())})
     if not _wait_health(port):
         print(f"velora serve-bridge: not healthy after "
@@ -442,6 +564,14 @@ def stop_bridge(args=None) -> int:
         return 0
     pid = int(state.get("pid") or 0)
     if pid and _pid_alive(pid):
+        if not _pid_is_bridge(pid, state):
+            # Pid reuse: the recorded pid now belongs to some other process.
+            # Killing it would take down an innocent process (BUG-015).
+            print(f"[bridge] pid {pid} is not the velora bridge "
+                  "(pid reuse?) -- not killing it; removing stale pidfile",
+                  file=sys.stderr)
+            _clear_state()
+            return 0
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.kill(pid, sig)
@@ -466,7 +596,8 @@ def status_bridge(args=None, fmt: str = "text") -> int:
     port = (getattr(args, "port", None) or DEFAULT_PORT) if args is not None else DEFAULT_PORT
     state = _read_state()
     pid = int(state.get("pid") or 0) if state else 0
-    alive = bool(pid and _pid_alive(pid))
+    # a recycled pid is not "running" -- it belongs to someone else (BUG-015)
+    alive = bool(pid and _pid_alive(pid) and _pid_is_bridge(pid, state))
     healthy = bridge_health(port)
     info = {"running": alive, "healthy": healthy, "pid": pid or None,
             "port": port, "base_url": f"http://127.0.0.1:{port}/v1",
@@ -511,8 +642,17 @@ def cmd_serve_bridge(args) -> int:
     print(f"[serve-bridge] opencode : {prep['opencode']}")
     print(f"[serve-bridge] bridge   : http://127.0.0.1:{port}  "
           f"(opencode on :{oc_port})")
+    token = os.environ.get("VELORA_BRIDGE_TOKEN", "") or secrets.token_hex(32)
+    env = dict(prep["env"])
+    env["VELORA_BRIDGE_TOKEN"] = token
     child = subprocess.Popen(_bridge_cmd(prep["node"], port, oc_port),
-                             cwd=prep["dst"], env=prep["env"])
+                             cwd=prep["dst"], env=env)
+    # Persist pid/token so health probes, `scan --ai` and `--status` from
+    # other terminals can authenticate (BUG-013); cleared on exit below.
+    _write_state({"pid": child.pid, "port": port, "oc_port": oc_port,
+                  "node": prep["node"], "opencode": prep["opencode"],
+                  "token": token, "cmdline": _capture_cmdline(child.pid),
+                  "foreground": True, "started_at": int(time.time())})
     try:
         if not _wait_health(port):
             print("velora serve-bridge: bridge did not become healthy in "
@@ -544,12 +684,16 @@ def cmd_serve_bridge(args) -> int:
         except subprocess.TimeoutExpired:
             child.kill()
         return 0
+    finally:
+        _clear_state()
 
 
 def _configure(base_url: str, model: Optional[str]) -> None:
     from velora.sil import model_config
     if not model:
-        with urllib.request.urlopen(f"{base_url}/models", timeout=10) as resp:
+        req = urllib.request.Request(f"{base_url}/models",
+                                     headers=auth_headers(base_url))
+        with urllib.request.urlopen(req, timeout=10) as resp:
             rows = json.loads(resp.read()).get("data", [])
         if not rows:
             raise RuntimeError("bridge returned no models to configure")

@@ -21,6 +21,7 @@ Usage:
 import argparse
 import sys
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import List
 
@@ -152,6 +153,20 @@ def parse_severity(name: str) -> Severity:
         "info": Severity.INFO,
     }
     return mapping.get(name.lower(), Severity.LOW)
+
+
+def filter_min_severity(result: ScanResult, min_severity: Severity) -> ScanResult:
+    """Copy `result` with vulnerabilities below `min_severity` removed.
+
+    The severity floor is applied exactly ONCE, before any formatter, so
+    text/JSON/SARIF all carry the same finding set and the --fail-on gate
+    agrees with the emitted artifact (BUG-017).
+    """
+    keep = [v for v in result.vulnerabilities
+            if severity_value(v.severity) >= severity_value(min_severity)]
+    if len(keep) == len(result.vulnerabilities):
+        return result
+    return replace(result, vulnerabilities=keep)
 
 
 def format_text_result(result: ScanResult, min_severity: Severity) -> str:
@@ -314,6 +329,27 @@ def cmd_scan(args) -> int:
         print(f"Error: Target not found: {args.target}", file=sys.stderr)
         return 1
 
+    # DOC-005: an AI layer the user asked for but that has no endpoint/model
+    # must say so on stderr unconditionally -- not only under -v. The scan
+    # proceeds without the LLM tier either way; silence makes `--ai` look like
+    # it worked. Same config source the scanner's own gate uses.
+    ai_requested = (getattr(args, "ai", False)
+                    or getattr(args, "llm_detect", False)
+                    or getattr(args, "llm_triage", False))
+    if ai_requested:
+        try:
+            from velora.sil.llm_triage import TriageConfig
+            _ai_cfg = TriageConfig.from_env()
+            _ai_configured = bool(getattr(_ai_cfg, "base_url", "")
+                                  and getattr(_ai_cfg, "model", ""))
+        except Exception:
+            _ai_configured = False
+        if not _ai_configured:
+            print("Note: AI layer requested (--ai) but no endpoint/model is "
+                  "configured (VELORA_LLM_BASE_URL / VELORA_LLM_MODEL); "
+                  "running without the LLM tier -- see docs/ai-models.md.",
+                  file=sys.stderr)
+
     # Create scanner
     try:
         # AI layer: --ai turns on both; --llm-detect / --llm-triage are granular.
@@ -352,16 +388,29 @@ def cmd_scan(args) -> int:
         print("No files found to scan.", file=sys.stderr)
         return 1
 
-    # Format output
+    # Apply the severity floor once, before any formatter: text/JSON/SARIF then
+    # expose identical finding sets and the exit gate matches the artifact
+    # (BUG-017).
     min_severity = parse_severity(args.min_severity)
+    results = [filter_min_severity(r, min_severity) for r in results]
+
+    # Scan I/O errors are a failure of their own: surface them on stderr (JSON
+    # payloads carry them too) and never exit 0 because of them, regardless of
+    # --fail-on, which gates findings only (BUG-018).
+    scan_errors = [e for r in results for e in r.errors]
+    for err in scan_errors:
+        print(f"Scan error: {err}", file=sys.stderr)
 
     if args.format == "text":
-        for result in results:
-            output = format_text_result(result, min_severity)
-            if args.output:
-                with open(args.output, 'a') as f:
-                    f.write(output)
-            else:
+        outputs = [format_text_result(result, min_severity)
+                   for result in results]
+        if args.output:
+            # One write, mode "w": a rerun must replace the previous report, not
+            # append to it (BUG-019). Multi-file scans join in one write.
+            with open(args.output, 'w') as f:
+                f.write("".join(outputs))
+        else:
+            for output in outputs:
                 print(output)
 
     elif args.format == "json":
@@ -380,9 +429,11 @@ def cmd_scan(args) -> int:
         else:
             print(output)
 
-    # Determine exit code
+    # Determine exit code: findings gate first (1), then scan I/O errors (3).
     if should_fail(results, args.fail_on):
         return 1
+    if scan_errors:
+        return 3
 
     return 0
 

@@ -196,9 +196,11 @@ def probe_chat(base_url: Optional[str] = None, model: Optional[str] = None,
         "temperature": 0,
         "max_tokens": 200,
     }).encode()
+    # Bearer for velora's own bridge (BUG-013); empty for any other endpoint.
+    headers = {"Content-Type": "application/json"}
+    headers.update(bridge_cli.auth_headers(f"{base}/chat/completions"))
     req = urllib.request.Request(
-        f"{base}/chat/completions", data=payload,
-        headers={"Content-Type": "application/json"})
+        f"{base}/chat/completions", data=payload, headers=headers)
     started = time.time()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

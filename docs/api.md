@@ -33,7 +33,7 @@ verifying heap properties:
 | `x \|-> v` | x points to value v |
 | `emp` | Empty heap |
 | `P * Q` | P and Q in separate memory |
-| `P -* Q` | Magic wand |
+| `P -* Q` | Magic wand (Python AST / internal pipelines only — the string parser does **not** accept `-*`) |
 | `P \|- Q` | P entails Q |
 
 **Built-in predicates:** `ls(x,y)`, `list(x)`, `tree(x)`, `dll(x,p,y,n)`

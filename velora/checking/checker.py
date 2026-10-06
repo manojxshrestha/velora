@@ -83,11 +83,19 @@ class EntailmentChecker:
                           Use for automatic specification inference, NOT standard entailment.
             use_s2s_normalization: Use S2S-style normalized unfolding to avoid disjunction explosion
                           (enabled by default for improved performance on benchmarks)
-            affine_semantics: Use affine/intuitionistic semantics (DEFAULT: True for bug finding).
-                          When True: P * Q |- P is VALID (extra heap can be "forgotten")
-                          When False: P * Q |- P is INVALID (exact/classical semantics for SL-COMP)
-                          For bug finding and bi-abduction, use True (default).
-                          For SL-COMP compliance testing, use False.
+            affine_semantics: Footprint pre-check toggle (DEFAULT: True).
+                          The core pipeline implements exact (SL-COMP-style)
+                          footprint discipline in BOTH modes: extra heap cannot
+                          be dropped, so `P * Q |- P` and `P |- emp` are INVALID
+                          for non-empty P (pinned by tests/test_lists.py,
+                          tests/test_trees.py, and the SL-COMP suites).
+                          When False, two extra `check_cyclic_proof_soundness`
+                          pre-checks run (before frame reduction and before Z3)
+                          that also reject entailments whose consequent
+                          footprint is smaller than the antecedent's.
+                          When True (default) those pre-checks are skipped;
+                          the remaining decision paths still enforce exact
+                          semantics. Use False for strictest SL-COMP mode.
         """
         self.predicate_registry = predicate_registry or PredicateRegistry()
         self.timeout = timeout

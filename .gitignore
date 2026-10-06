@@ -1,6 +1,5 @@
-# Local runtime artifacts and agent notes (never push)
+# Local runtime artifacts (never push)
 logs/
-CLAUDE.md
 runs/
 velora-run.json
 

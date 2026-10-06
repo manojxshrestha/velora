@@ -131,6 +131,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Enable LLM triage only (drops confident false positives)"
     )
     scan_parser.add_argument(
+        "--repo-scale",
+        action="store_true",
+        help="Analyze the whole repository in one LLM session instead of one per "
+             "file. Far faster and cheaper on real projects, and lets the model "
+             "follow flows across files. Requires --ai or --llm-detect."
+    )
+    scan_parser.add_argument(
         "--model",
         help="Override VELORA_LLM_MODEL for this scan (same as setting the env var)"
     )
@@ -254,7 +261,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     fix_parser.add_argument(
         "--diff", action="store_true",
-        help="Print a unified diff of the patches (the default when --in-place is off)"
+        help="Print a unified diff of the patches (the default when --in-place is "
+             "off; combined with --in-place, write the files AND print the diff)"
     )
     fix_parser.add_argument(
         "--no-verify", action="store_true",
@@ -292,8 +300,8 @@ def create_parser() -> argparse.ArgumentParser:
     solve_parser.add_argument(
         "--unfold-depth",
         type=int,
-        default=3,
-        help="Maximum predicate unfolding depth (default: 3)"
+        default=None,
+        help="Maximum predicate unfolding depth (default: the checker default, 6)"
     )
     solve_parser.add_argument(
         "-v", "--verbose",
@@ -331,8 +339,8 @@ def create_parser() -> argparse.ArgumentParser:
     check_parser.add_argument(
         "--unfold-depth",
         type=int,
-        default=3,
-        help="Maximum predicate unfolding depth (default: 3)"
+        default=None,
+        help="Maximum predicate unfolding depth (default: the checker default, 6)"
     )
     check_parser.add_argument(
         "-v", "--verbose",
@@ -659,19 +667,56 @@ _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
 def _load_findings(raw: str) -> List[dict]:
     """Flatten a `velora scan -f json` payload (single file, multi-file, or a bare
-    list) into a flat list of finding dicts."""
+    list) into a flat list of finding dicts.
+
+    Malformed *containers* raise ValueError with a clean message (the callers
+    turn that into `Error reading ... findings: malformed findings file ...`
+    and a non-traceback exit). Malformed *entries* are skipped with a warning
+    -- a hand-edited or partially-written findings file must never crash
+    exploit/fix with an AttributeError traceback (BUG-010).
+    """
     data = json.loads(raw)
+
+    def _entries(items, where: str) -> List[dict]:
+        if not isinstance(items, list):
+            raise ValueError(
+                f"malformed findings file: {where} must be a list, "
+                f"got {type(items).__name__}")
+        out: List[dict] = []
+        for i, item in enumerate(items):
+            if isinstance(item, dict):
+                out.append(item)
+            else:
+                print(f"Warning: skipping malformed findings entry {where}[{i}] "
+                      f"(expected an object, got {type(item).__name__})",
+                      file=sys.stderr)
+        return out
+
     if isinstance(data, list):
-        return data
+        return _entries(data, "top-level findings")
     if isinstance(data, dict):
         if "vulnerabilities" in data:
-            return data["vulnerabilities"] or []
+            return _entries(data["vulnerabilities"], '"vulnerabilities"')
         if "files" in data:
+            if not isinstance(data["files"], list):
+                raise ValueError(
+                    f'malformed findings file: "files" must be a list, '
+                    f"got {type(data['files']).__name__}")
             out: List[dict] = []
-            for f in data["files"]:
-                out.extend(f.get("vulnerabilities", []) or [])
+            for i, f in enumerate(data["files"]):
+                if not isinstance(f, dict):
+                    print(f"Warning: skipping malformed files[{i}] "
+                          f"(expected an object, got {type(f).__name__})",
+                          file=sys.stderr)
+                    continue
+                out.extend(_entries(f.get("vulnerabilities") or [],
+                                    f"files[{i}].vulnerabilities"))
             return out
-    return []
+        raise ValueError('malformed findings file: no "vulnerabilities" or '
+                         '"files" key found')
+    raise ValueError(
+        f"malformed findings file: expected an object or array, "
+        f"got {type(data).__name__}")
 
 
 def _top_finding(findings: List[dict]) -> Optional[dict]:
@@ -707,7 +752,8 @@ def _select_findings(findings: List[dict], n: int = 6) -> List[dict]:
     finding can outrank the actual path traversal. Passing several deduped leads
     (one per distinct cwe+type+file) lets the agent attack the right surface.
     """
-    ranked = sorted(findings, key=_finding_rank, reverse=True)
+    ranked = sorted((f for f in findings if isinstance(f, dict)),
+                    key=_finding_rank, reverse=True)
     seen: set = set()
     out: List[dict] = []
     for f in ranked:
@@ -727,7 +773,7 @@ def cmd_exploit(args, _raw_argv: Optional[List[str]] = None) -> int:
     import subprocess
     from velora.sil.llm_client import LLMConfig
     from velora.sil.llm_exploit import (
-        exploit_agentic, local_exec_tool, guidance_from_finding,
+        exploit_agentic, local_exec_tool, guidance_from_finding, target_hosts,
     )
 
     # LLM config from env (VELORA_LLM_*). --model overrides VELORA_LLM_MODEL, the
@@ -786,7 +832,11 @@ def cmd_exploit(args, _raw_argv: Optional[List[str]] = None) -> int:
                     print(f"[success-check] {evidence[:120]}", flush=True)
             return proc.returncode == 0
 
-    exec_tool = local_exec_tool(timeout=args.exec_timeout)
+    # Remote commands are restricted to the --target origin (BUG-008):
+    # a crafted findings file must not be able to steer the agent's shell at
+    # an attacker-controlled host.
+    exec_tool = local_exec_tool(timeout=args.exec_timeout,
+                                allow_hosts=target_hosts(args.target))
     result = exploit_agentic(task_prompt, config, exec_tool=exec_tool,
                              guidance=guidance, is_solved=is_solved,
                              max_steps=args.max_steps)
@@ -832,15 +882,56 @@ def _lang_for(path: str) -> str:
 
 
 def _resolve_finding_file(loc: Optional[str], source: str) -> Optional[str]:
-    """Locate a finding's file relative to the user-supplied source path."""
-    if loc and os.path.isfile(loc):
-        return loc
+    """Locate a finding's file, refusing anything outside the source root.
+
+    SECURITY (BUG-007): a findings file must never be able to point the
+    in-place writer at a path outside --source. Candidate paths are resolved
+    with realpath and accepted only when they remain inside the realpath of
+    --source (symlinks and `..` traversal are resolved before the check).
+
+    Resolution order:
+      1. ``loc`` joined onto the --source root (relative locations resolve
+         against --source, never the process CWD)
+      2. ``loc``'s basename under the --source root
+      3. ``loc`` as given (absolute or CWD-relative) -- accepted only if it
+         is inside the source root; otherwise a warning is printed and the
+         finding is skipped.
+    Falls back to ``source`` itself when it is a file and no ``loc`` matched.
+    """
+    if source and os.path.isdir(source):
+        source_root = os.path.realpath(source)
+    elif source:
+        source_root = os.path.realpath(os.path.dirname(os.path.abspath(source))
+                                       or os.getcwd())
+    else:
+        source_root = os.getcwd()
+
+    def _inside(p: str) -> bool:
+        try:
+            return os.path.commonpath([os.path.realpath(p), source_root]) == source_root
+        except ValueError:
+            # e.g. different drives, or mixing absolute and relative paths
+            return False
+
+    if loc:
+        # os.path.join ignores source_root when loc is absolute, which is what
+        # we want: absolute locs are still containment-checked below.
+        candidates = [os.path.join(source_root, loc),
+                      os.path.join(source_root, os.path.basename(loc))]
+        for cand in candidates:
+            if os.path.isfile(cand) and _inside(cand):
+                return os.path.realpath(cand)
+        if os.path.isfile(loc):
+            if _inside(loc):
+                return os.path.realpath(loc)
+            print(f"Warning: finding location {loc!r} is outside the source "
+                  f"root ({source_root}); skipping this finding.",
+                  file=sys.stderr)
+            return None
+        # loc given but nowhere on disk: keep the historical fallback of
+        # patching the source file itself (it is inside the root by design).
     if os.path.isfile(source):
-        return source
-    if loc and os.path.isdir(source):
-        cand = os.path.join(source, os.path.basename(loc))
-        if os.path.isfile(cand):
-            return cand
+        return os.path.realpath(source)
     return None
 
 
@@ -910,6 +1001,10 @@ def cmd_fix(args) -> int:
         if patched != original:
             if args.in_place:
                 Path(fp).write_text(patched)
+                # --in-place writes silently by default; an explicit --diff also
+                # shows what changed (BUG-016: the flag used to be inert).
+                if getattr(args, "diff", False) and args.format != "json":
+                    print(make_diff(fp, original, patched))
             elif args.format != "json":
                 print(make_diff(fp, original, patched))
 
@@ -925,7 +1020,9 @@ def cmd_fix(args) -> int:
                  "STILL DETECTED" if r.verified is False else "verify-skipped")
             print(f"  {r.cwe} {os.path.basename(r.file)}:{r.line} -> "
                   + (f"patched ({v})" if r.applied else "could not apply"))
-        mode = "written in place" if args.in_place else "shown as diff"
+        mode = ("written in place" + (" + diff shown" if getattr(args, "diff", False)
+                                      else "")
+                if args.in_place else "shown as diff")
         print(f"\n{applied_n}/{len(results)} findings patched ({mode}); "
               f"{verified_n} verified fixed by re-scan.")
     return 0 if applied_n > 0 else 1
@@ -954,6 +1051,8 @@ def cmd_solve(args) -> int:
 
     # Create checker
     checker = EntailmentChecker(timeout=args.timeout)
+    if getattr(args, "unfold_depth", None) is not None:
+        checker.predicate_registry.max_unfold_depth = args.unfold_depth
 
     if args.verbose:
         print(f"Checking: {entailment}")
@@ -1033,6 +1132,8 @@ def cmd_check(args) -> int:
 
     # Create checker
     checker = EntailmentChecker(timeout=args.timeout)
+    if getattr(args, "unfold_depth", None) is not None:
+        checker.predicate_registry.max_unfold_depth = args.unfold_depth
 
     # Check each entailment
     results = []
@@ -1526,6 +1627,7 @@ def main(argv: List[str] = None) -> int:
 
     handler = commands.get(args.command)
     if handler:
+        from velora.sil.llm_client import LLMUnavailableError
         try:
             if args.command in ("scan", "exploit"):
                 return handler(args, _raw_argv=raw_argv)
@@ -1533,6 +1635,16 @@ def main(argv: List[str] = None) -> int:
         except KeyboardInterrupt:
             print("\ninterrupted -- stopping (exit 130)", file=sys.stderr)
             return 130
+        except LLMUnavailableError as exc:
+            # Documented exit-code contract (BUG-011): 2 == the LLM
+            # endpoint is unreachable. Previously this surfaced as a raw
+            # traceback at exit 1, so automation could not tell "no findings"
+            # from "tool broke". Tracebacks stay available behind -v.
+            if getattr(args, "verbose", 0):
+                import traceback
+                traceback.print_exc()
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     else:
         parser.print_help()
         return 1

@@ -41,6 +41,11 @@ classifiers = [
 
 dependencies = [
     "z3-solver>=4.8.0",
+    # Default TTY experience (`velora tui`, the auto-opened scan TUI) imports
+    # these at module import; requirements.txt has always shipped them as core
+    # deps, so `pip install .` must too (bugfix BUG-021).
+    "prompt-toolkit>=3.0.0",
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -57,8 +62,10 @@ scan = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "coverage>=7.0.0",
     "requests>=2.25.0",
     "zstandard>=0.22.0",
+    "pyyaml>=6.0",
 ]
 all = [
     "tree-sitter>=0.21.0",
@@ -71,8 +78,10 @@ all = [
     "tree-sitter-c-sharp>=0.21.0",
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "coverage>=7.0.0",
     "requests>=2.25.0",
     "zstandard>=0.22.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]

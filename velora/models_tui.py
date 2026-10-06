@@ -70,8 +70,10 @@ def bridge_base(args=None) -> str:
 
 
 def fetch_models(base_url: str, timeout: float = 5.0) -> List[str]:
-    with urllib.request.urlopen(f"{base_url.rstrip('/')}/models",
-                                timeout=timeout) as resp:
+    url = f"{base_url.rstrip('/')}/models"
+    # Bearer for velora's own bridge (BUG-013); empty for anything else.
+    req = urllib.request.Request(url, headers=bridge_cli.auth_headers(url))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read())
     rows = payload.get("data") or []
     ids = [str(r.get("id") or "") for r in rows]

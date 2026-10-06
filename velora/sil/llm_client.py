@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -40,6 +41,59 @@ class LLMUnavailableError(RuntimeError):
     retries. Raised instead of silently returning empty results -- a scan that
     could not run the LLM layer must surface an error, never a misleading
     "no vulnerabilities found"."""
+
+
+def _same_origin(old_url: str, new_url: str) -> bool:
+    """True only for a same-origin redirect target (scheme + host + effective port).
+
+    Conservative by design (BUG-014): Authorization survives a redirect only
+    when it stays on the exact origin the credential was meant for; scheme or
+    port changes drop it along with host changes."""
+    try:
+        old = urllib.parse.urlsplit(old_url)
+        new = urllib.parse.urlsplit(new_url)
+    except ValueError:
+        return False
+
+    def eff(part: urllib.parse.SplitResult) -> tuple:
+        port = part.port
+        if port is None:
+            port = 443 if part.scheme.lower() == "https" else 80
+        return (part.scheme.lower(), (part.hostname or "").lower(), port)
+
+    return eff(old) == eff(new)
+
+
+class _AuthStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never forward Authorization off the original origin.
+
+    CPython's default redirect handler copies request headers (minus
+    content-length/content-type) onto the redirected request, so a hostile or
+    compromised endpoint could 302 a Bearer token -- the user's API key or the
+    bridge session token -- to a server the user never configured (BUG-014;
+    verified empirically: urllib forwards Authorization across hosts). This
+    handler strips Authorization whenever the redirect target is not
+    same-origin. Used via a dedicated opener below; the global urllib opener
+    is left untouched."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        newreq = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if newreq is None:
+            return None
+        if not _same_origin(getattr(req, "full_url", "") or "", newurl):
+            for hdr in [h for h in list(getattr(newreq, "headers", {}) or {})
+                        if h.lower() == "authorization"]:
+                newreq.headers.pop(hdr, None)
+            unred = getattr(newreq, "unredirected_hdrs", None)
+            if isinstance(unred, dict):
+                for hdr in [h for h in list(unred) if h.lower() == "authorization"]:
+                    unred.pop(hdr, None)
+        return newreq
+
+
+# Dedicated opener: redirect policy above + urllib's standard handlers. Not
+# install_opener() -- other urllib users in the process keep default behavior.
+_OPENER = urllib.request.build_opener(_AuthStrippingRedirectHandler())
 
 
 @dataclass
@@ -178,6 +232,28 @@ def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _completion_message(data: Any, endpoint: str) -> str:
+    """Validate an OpenAI-shaped response and return the message content.
+
+    A flaky or misconfigured endpoint (empty/missing ``choices``, scalar
+    ``message``, missing keys, HTML gateway pages) must degrade through the
+    retry path into ``LLMUnavailableError`` -- never a KeyError/IndexError/
+    TypeError traceback out of ``complete()`` (BUG-020).
+    """
+    try:
+        choices = data["choices"]
+        message = choices[0]["message"]
+        content = message["content"]
+    except (TypeError, KeyError, IndexError) as exc:
+        raise LLMUnavailableError(
+            f"malformed chat completion from {endpoint}: {exc}") from exc
+    if not isinstance(content, str):
+        raise LLMUnavailableError(
+            f"malformed chat completion from {endpoint}: content is "
+            f"{type(content).__name__}, not str")
+    return content
+
+
 class LLMClient:
     """Calls an OpenAI-compatible chat endpoint. `call_fn` overrides the HTTP
     transport (used in tests and to swap in a local SDK). Layer-agnostic: prompts
@@ -263,7 +339,9 @@ class LLMClient:
 
         def _worker():
             try:
-                resp = urllib.request.urlopen(req, timeout=st)
+                # Dedicated opener: strips Authorization on off-origin
+                # redirects (BUG-014); urllib.request.urlopen would forward it.
+                resp = _OPENER.open(req, timeout=st)
                 box["resp"] = resp
                 box["raw"] = resp.read()
             except Exception as exc:      # surfaced to the caller below
@@ -302,6 +380,31 @@ class LLMClient:
             raise box["error"]
         return box["raw"]
 
+    def _bearer_value(self) -> str:
+        """Value for the Authorization header ("" -> omit the header).
+
+        1. velora's local opencode bridge requires its per-session token
+           (BUG-013): when `base_url` IS our bridge, that token wins -- so a
+           secured bridge never sees the `sk-local` placeholder.
+        2. `bridge_token_for` only matches loopback HTTP on our own bridge
+           port, so the token can never be forwarded to a foreign host/port.
+        3. Everything else keeps the pre-existing api_key behavior (including
+           `sk-local` for keyless/local providers, and omission for
+           `none`/`anything`/empty -- some local servers reject any
+           Authorization header)."""
+        base = getattr(self.config, "base_url", "") or ""
+        try:
+            from velora.bridge_cli import bridge_token_for
+            tok = bridge_token_for(base)
+            if tok:
+                return tok
+        except Exception:  # noqa: BLE001 -- auth must never break transport
+            pass
+        key = (self.config.api_key or "").strip()
+        if key and key.lower() not in ("none", "anything"):
+            return key
+        return ""
+
     def _post_chat(self, messages: List[Dict[str, str]], max_tokens: Optional[int],
                    response_format: Optional[Dict[str, Any]]) -> str:
         url = f"{self.config.base_url}/chat/completions"
@@ -315,13 +418,18 @@ class LLMClient:
             body["response_format"] = response_format
         payload = json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"}
-        # Some local servers (e.g. OptiQ) reject *any* Authorization header; only
-        # send one when a key is actually configured. Set VELORA_LLM_API_KEY="" to omit.
-        if self.config.api_key and self.config.api_key.lower() not in ("none", "anything"):
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        bearer = self._bearer_value()
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
         req = urllib.request.Request(url, data=payload, headers=headers)
-        data = json.loads(self._urlopen_read(req).decode("utf-8"))
-        return data["choices"][0]["message"]["content"]
+        raw = self._urlopen_read(req)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise LLMUnavailableError(
+                f"malformed chat completion from {url}: not valid JSON "
+                f"({exc})") from exc
+        return _completion_message(data, url)
 
     def complete(self, messages: List[Dict[str, str]], *,
                  max_tokens: Optional[int] = None, force_json: bool = True,
@@ -348,6 +456,16 @@ class LLMClient:
         for i in range(attempts):
             try:
                 return _do()
+            except LLMUnavailableError as exc:
+                # Malformed response shape (BUG-020): retry a flaky endpoint,
+                # then fail cleanly instead of tracebacking.
+                last_err = exc
+                self.stats["errors"] += 1
+                if i + 1 < attempts:
+                    _log.warning("LLM call to %s returned a malformed response "
+                                 "(attempt %d/%d): %s -- retrying",
+                                 self.config.base_url, i + 1, attempts, exc)
+                    time.sleep(1.5 * (i + 1))
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_err = exc
                 self.stats["errors"] += 1
@@ -381,8 +499,9 @@ class LLMClient:
             body["tools"] = tools
             body["tool_choice"] = "auto"
         headers = {"Content-Type": "application/json"}
-        if self.config.api_key and self.config.api_key.lower() not in ("none", "anything"):
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        bearer = self._bearer_value()
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
         data = json.dumps(body).encode("utf-8")
         attempts = max(1, getattr(self.config, "agent_retries", 2) + 1)
         for i in range(attempts):
@@ -392,8 +511,18 @@ class LLMClient:
                 out = json.loads(self._urlopen_read(
                     req, sock_timeout=getattr(self.config, "agent_timeout", 0)
                     or None).decode("utf-8"))
-                return out["choices"][0]["message"]
-            except (urllib.error.URLError, KeyError, ValueError, TimeoutError, OSError) as exc:
+                try:
+                    message = out["choices"][0]["message"]
+                except (TypeError, KeyError, IndexError) as exc:
+                    # wrong shape (BUG-020) -> same retry/failure path
+                    raise ValueError(f"malformed chat completion: {exc}") from exc
+                if not isinstance(message, dict):
+                    raise ValueError(
+                        f"malformed chat completion: message is "
+                        f"{type(message).__name__}, not an object")
+                return message
+            except (urllib.error.URLError, KeyError, ValueError, TypeError,
+                    IndexError, TimeoutError, OSError) as exc:
                 self.stats["errors"] += 1
                 if i + 1 < attempts:      # transient blip -> back off and retry
                     print(f"[llm] transport attempt {i + 1}/{attempts} failed "

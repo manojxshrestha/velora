@@ -16,6 +16,8 @@ import {
   estimateTokens,
   openaiResponse,
   openaiError,
+  guardRequest,
+  requestHostname,
 } from "./server.js";
 
 test("parseArgs handles flags with and without values", () => {
@@ -177,4 +179,72 @@ test("openaiError wraps message/type/code", () => {
   const e = openaiError(404, "nope", "invalid_request_error", "model_not_found");
   assert.equal(e.status, 404);
   assert.deepEqual(e.body.error, { message: "nope", type: "invalid_request_error", code: "model_not_found" });
+});
+
+// --- BUG-013: request guard (Host / Origin / token) ------------------------
+
+test("requestHostname strips port and brackets", () => {
+  assert.equal(requestHostname("127.0.0.1:8399"), "127.0.0.1");
+  assert.equal(requestHostname("localhost:8399"), "localhost");
+  assert.equal(requestHostname("[::1]:8399"), "[::1]");
+  assert.equal(requestHostname("evil.example:8399"), "evil.example");
+  assert.equal(requestHostname("evil.example"), "evil.example");
+  assert.equal(requestHostname(""), "");
+  assert.equal(requestHostname(undefined), "");
+});
+
+test("guardRequest allows loopback Host (no token configured)", () => {
+  assert.equal(guardRequest({ headers: { host: "127.0.0.1:8399" } }, { token: "" }), null);
+  assert.equal(guardRequest({ headers: { host: "localhost:8399" } }, { token: "" }), null);
+  assert.equal(guardRequest({ headers: { host: "[::1]:8399" } }, { token: "" }), null);
+  assert.equal(guardRequest({ headers: { host: "127.0.0.1:8399" } }, {}), null);
+});
+
+test("guardRequest rejects non-loopback Host (DNS rebinding)", () => {
+  for (const host of ["evil.example:8399", "evil.example", "attacker.tld:8399"]) {
+    const d = guardRequest({ headers: { host } }, { token: "" });
+    assert.ok(d, `expected denial for Host ${host}`);
+    assert.equal(d.status, 403);
+    assert.equal(d.body.error.code, "forbidden_host");
+  }
+  // 127.x.x.x is loopback, "127.evil.example" is NOT (prefix trick)
+  assert.equal(guardRequest({ headers: { host: "127.1.2.3:8399" } }, { token: "" }), null);
+  const d = guardRequest({ headers: { host: "127.evil.example:8399" } }, { token: "" });
+  assert.equal(d && d.status, 403);
+});
+
+test("guardRequest: Origin present and foreign -> 403, loopback -> ok", () => {
+  const host = { host: "127.0.0.1:8399" };
+  // no Origin (urllib/curl/CLI) passes
+  assert.equal(guardRequest({ headers: { ...host } }, { token: "" }), null);
+  // loopback origins pass (any local port)
+  assert.equal(guardRequest({ headers: { ...host, origin: "http://127.0.0.1:5555" } }, { token: "" }), null);
+  assert.equal(guardRequest({ headers: { ...host, origin: "http://localhost:3000" } }, { token: "" }), null);
+  // foreign origin rejected
+  for (const origin of ["https://evil.example", "http://127.0.0.1.evil.example", "null", "file://"]) {
+    const d = guardRequest({ headers: { ...host, origin } }, { token: "" });
+    assert.ok(d, `expected denial for Origin ${origin}`);
+    assert.equal(d.status, 403, `Origin ${origin}`);
+    assert.equal(d.body.error.code, "forbidden_origin");
+  }
+});
+
+test("guardRequest: token enforced when configured", () => {
+  const host = { host: "127.0.0.1:8399" };
+  // missing / wrong / malformed Authorization -> 401
+  for (const authorization of [undefined, "", "Bearer wrong", "Bearer tokensuffix", "Basic Zm9v"]) {
+    const headers = { ...host };
+    if (authorization !== undefined) headers.authorization = authorization;
+    const d = guardRequest({ headers }, { token: "0123456789abcdef" });
+    assert.ok(d, `expected denial for authorization=${authorization}`);
+    assert.equal(d.status, 401, `authorization=${authorization}`);
+    assert.equal(d.body.error.code, "unauthorized");
+  }
+  // exact bearer passes
+  assert.equal(
+    guardRequest({ headers: { ...host, authorization: "Bearer 0123456789abcdef" } },
+      { token: "0123456789abcdef" }),
+    null);
+  // no token configured -> auth not required (raw `node server.js` dev mode)
+  assert.equal(guardRequest({ headers: host }, { token: "" }), null);
 });

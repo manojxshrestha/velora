@@ -43,10 +43,15 @@ pip install "velora[scan] @ git+https://github.com/manojxshrestha/velora.git"
 
 | Command | What you get |
 |---------|--------------|
-| `pip install -e .` | Minimal: separation-logic solver (`solve`, `check`, `parse`, `repl`) only — `velora scan` will refuse with a tree-sitter install hint |
+| `pip install -e .` | Minimal: separation-logic solver (`solve`, `check`, `parse`, `repl`) — and the interactive-view dependencies (`prompt-toolkit`, `rich`) are core requirements, so the TTY view never breaks. `velora scan` will refuse with a tree-sitter install hint |
 | `pip install -e ".[scan]"` | **Recommended.** Everything: all 5 symbolic language frontends for `velora scan` |
-| `pip install -e ".[dev]"` | `scan` prerequisites + pytest for running the test suite |
-| `pip install -e ".[all]"` | `scan` + `dev` combined |
+| `pip install -e ".[dev]"` | Test-suite tooling (pytest, coverage, PyYAML, zstandard); combine with `[scan]` — or just use `[all]` — so scanner tests can run too |
+| `pip install -e ".[all]"` | `scan` + `dev` combined — the CI `pyproject-install` job runs the full suite from exactly this install |
+
+A clean `pip install .` is a first-class supported path: the packaging CI job
+(`pyproject-install`) installs only from `pyproject.toml` and runs `pytest tests/`,
+so a dependency that lives only in `requirements.txt` can never silently break
+the CLI or the test collection again.
 
 **Verify** (all three must work):
 
