@@ -1,10 +1,12 @@
 # Velora Architecture
 
-How Velora is put together, what each layer may be trusted to do, and where the
-seams are. Written against `main` @ `cf6aabf` from the code itself; every
-deviation found in the October 2026 audit is fixed here (or reclassified with
-the reason recorded) and pinned by a regression test in
-`tests/test_bugfix_regressions.py`.
+How Velora is put together: what each layer does, what it may be trusted to
+do, and where the seams between layers are. This document is derived from
+the code itself rather than from intent — every deviation the audit
+uncovered is either corrected here or reclassified as a deliberate design
+trade-off with the reason recorded. Each such item is pinned by a
+regression test in `tests/test_bugfix_regressions.py`, so the behaviour
+described below cannot silently drift.
 
 ## 1. Two cores, one loop
 
@@ -403,8 +405,8 @@ Rules the code must enforce (enforced as noted):
 
 ## 15. Known soundness caveats (pointer)
 
-This document's §4 and §7 flag each trust caveat inline. Status after the
-October 2026 remediation (regression tests in
+This document's §4 and §7 flag each trust caveat inline. Current status
+(regression tests in
 `tests/test_bugfix_regressions.py`):
 
 - BUG-001/002 — **fixed**: antecedent satisfiability decided uniformly
