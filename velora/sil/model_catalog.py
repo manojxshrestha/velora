@@ -83,7 +83,7 @@ def cache_dir() -> Path:
 
 
 def _http_get(url: str, timeout: int = _HTTP_TIMEOUT) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "velora/0.0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "velora/0.1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 

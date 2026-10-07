@@ -242,7 +242,7 @@ The agentic phase: a bounded, tool-using LLM loop against a live target,
 
 ```
 messages = [system(+guidance) + task prompt]
-repeat up to --max-steps (default 250):
+repeat up to --max-steps (default 40):
    ▶ LLM call (agent timeout 300 s; structured streaming via llm_client)
         │
         ├─ tool_calls? ─▶ execute (run / read_file / grep, outputs truncated

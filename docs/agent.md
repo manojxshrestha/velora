@@ -152,7 +152,7 @@ the run's success still reflects the claim, not an oracle.
 **Detect/triage:** last assistant content without tool calls is the answer
 (`finalize`).
 
-**Budget:** `--max-steps` (default 250); exhaustion →
+**Budget:** `--max-steps` (default 40); exhaustion →
 `✗ NOT EXPLOITED (... step budget exhausted)`, exit 1.
 
 ## 7. Failure handling

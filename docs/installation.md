@@ -14,7 +14,7 @@ cd velora
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e ".[scan]"
-velora --version          # -> velora 0.0.1
+velora --version          # -> velora 0.1.0
 ```
 
 What each step does:
@@ -81,7 +81,7 @@ velora doctor --probe # end-to-end check: one real keyless chat through the brid
 ```text
 velora doctor
   ✅ platform         Linux … (x86_64) WSL
-  ✅ python           Python 3.14.7, velora 0.0.1, z3 5.1.0
+  ✅ python           Python 3.14.7, velora 0.1.0, z3 5.1.0
   ✅ node             …/node (v22.23.3)
   ✅ opencode         …/opencode (1.18.34)
   ✅ bridge-sources   …/velora/_bridge

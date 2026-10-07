@@ -378,7 +378,7 @@ Rules the code must enforce (enforced as noted):
 | Plain LLM call | `VELORA_LLM_TIMEOUT` | 120 s |
 | Agent round-trip | `VELORA_LLM_AGENT_TIMEOUT` | 300 s (wall ≥ 600 s/attempt) |
 | Tool execution | `--exec-timeout` | 120 s |
-| Exploit budget | `--max-steps` | 250 |
+| Exploit budget | `--max-steps` | 40 |
 
 ## 13. Testing architecture
 
