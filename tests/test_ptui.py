@@ -1,4 +1,4 @@
-"""Tests for the PentestGPT-style interface (velora.ptui)."""
+"""Tests for the interactive line interface (velora.ptui)."""
 
 from __future__ import annotations
 
@@ -49,14 +49,14 @@ def _out(session: VeloraSession) -> str:
 
 
 # -- menus -----------------------------------------------------------------
-def test_main_menu_verbs_match_pentestgpt():
+def test_main_menu_verbs_expected():
     assert mainTaskCompleter.tasks == [
         "next", "more", "todo", "discuss", "google", "help", "quit"]
     assert mainTaskCompleter().task_details.count("\n - ") >= 7
     assert "Velora" in str(mainTaskCompleter.task_meta["todo"])
 
 
-def test_local_menu_verbs_match_pentestgpt():
+def test_local_menu_verbs_expected():
     assert localTaskCompleter.tasks == [
         "discuss", "brainstorm", "help", "google", "continue"]
 

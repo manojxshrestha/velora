@@ -2,9 +2,9 @@
 
 [← Back to README](../README.md)
 
-One CLI, two jobs: a security loop (**scan → exploit → fix → scan again**) and a separation-logic solver. Everything below is copy-pasteable; `velora <command> --help` lists every flag.
+One CLI, three jobs: a security loop (**scan → exploit → fix → scan again**), three staged testing modes (**whitebox / blackbox / bughunt** — sessions, resume, capability contract), and a separation-logic solver. Everything below is copy-pasteable; `velora <command> --help` lists every flag.
 
-**Contents** — [Quick Start](#quick-start) · [Command pack](#command-pack-black-box-white-box--enterprise) · [Scan](#scan) · [Exploit](#exploit) · [Fix](#fix) · [AI & Model Setup](#ai--model-setup) · [Separation Logic](#separation-logic) · [Commands Reference](#commands-reference) · [Troubleshooting](#troubleshooting)
+**Contents** — [Quick Start](#quick-start) · [Command pack](#command-pack-black-box-white-box--enterprise) · [Testing modes](#testing-modes-whitebox--blackbox--bughunt) · [Scan](#scan) · [Exploit](#exploit) · [Fix](#fix) · [AI & Model Setup](#ai--model-setup) · [Separation Logic](#separation-logic) · [Commands Reference](#commands-reference) · [Troubleshooting](#troubleshooting)
 
 ## Quick Start
 
@@ -111,6 +111,104 @@ velora exploit --target https://target.com --scope scope.txt --login-url https:/
 - **`--format json --trace-out`** keeps the machine-readable summary plus the full transcript for the report.
 - **Exit codes:** `0` = proven/solved/clean · `1` = invalid findings/not solved · `2` = LLM unreachable (clean `error: ...` on stderr, no traceback) or usage error.
 
+## Testing modes: whitebox / blackbox / bughunt
+
+Three staged pipelines over one session dir. `velora modes` prints every
+graph side by side (● default, ○ off-default, – unavailable); the published
+per-release snapshot lives in [Capability matrix](capability-matrix.md).
+
+| Mode | Input | Shape |
+|---|---|---|
+| `velora whitebox --source <path>` | source in hand | 15 stages: INGEST → … → STATIC SCAN → VERIFY → REPORT |
+| `velora blackbox <url>` | live target, no source assumptions | 14 stages: SCOPE → AUTH → RECON → … → CAPTURE → VALIDATE → REPORT |
+| `velora bughunt <url>` | live target + a model | looping hunt: HUNT → DEEPTHINK → SEARCH ↺ → REPORT |
+
+### Stage grammar: ranges, exact lists, extras
+
+```bash
+velora blackbox https://target.com --dry-run            # resolve the plan, print it, run nothing (exit 0)
+velora blackbox https://target.com --until enumeration  # range: stages up to and including ENUMERATION
+velora blackbox https://target.com --from triage        # resume: earlier artifacts load from the session
+velora bughunt https://target.com --only scope,hunt,report   # exact list, canonical order
+velora whitebox --source src --skip rescan,fix          # default graph minus stages
+velora whitebox --source src --with-validate            # default graph + off-default stage
+velora whitebox --source src --list-stages -f json      # machine-readable stage registry (CI)
+```
+
+Guards and gates: `SCOPE` always runs first and is not stage-selectable
+(naming it exits `2`); `FIX`/`RESCAN`/`VALIDATE` are findings-gated and run
+`n/a` with zero findings unless selected explicitly; an `unavailable` stage
+refuses loudly (exit `2`), never silently skips. `velora <mode> --help`
+prints the mode's graph with the engine status per stage.
+
+### Sessions: archive, resume, prune
+
+```bash
+velora blackbox https://target.com                 # session created under .velora/<mode>-<hash>/
+velora blackbox https://target.com --from hunt      # resume from a stage (the session resolves automatically)
+velora sessions list                                # newest first (retention is keep-all by default)
+velora sessions prune --keep 5 --dry-run            # preview what an age-out would delete
+velora sessions prune --keep 5                      # keep the 5 newest sessions, delete the rest
+velora sessions prune --all                         # start clean
+```
+
+Every stage commit lands in the session dir (`findings.json`,
+`evidence.json`, `report.md`, …); sessions are archivable and re-runnable.
+
+### Authenticated runs: roles + login scripts
+
+```bash
+# cookie/header jars as files; an optional ROLE= prefix keeps two roles apart
+# (two sessions = authz/IDOR comparison)
+velora blackbox https://target.com \
+  --auth-file admin=/tmp/admin.cookies --auth-file user=/tmp/user.cookies
+
+# scripted login: JSON steps run at AUTH, credentials via ${ENV}, values are
+# never stored (session keeps references only)
+velora blackbox https://target.com --auth-script login.json
+```
+
+`login.json` — closed schema, relative URLs resolve against the target, the
+extracted value feeds later `${capture}`/header use:
+
+```json
+{"name": "form login", "steps": [
+  {"get": "/login"},
+  {"post": "/login", "form": {"user": "${USER}", "pass": "${PASS}"},
+   "expect": {"status": 200}},
+  {"extract": {"name": "csrf", "from": "body",
+               "pattern": "name=\"csrf\" value=\"([^\"]+)\""}}
+]}
+```
+
+Precedence: CLI `--header` beats script output beats the jar file. Auth
+requests never record bodies into evidence.
+
+### Batch discipline, progress events, interactive views
+
+```bash
+velora blackbox https://target.com --progress json 2>stages.ndjson  # NDJSON stage events on stderr
+velora bughunt https://target.com --no-tui                           # force batch even on a TTY
+velora whitebox --source src --curses                                # classic curses view
+```
+
+stdout stays artifact-only — banners and progress go to stderr, so
+`-f json` pipes never break. On a TTY the interactive line view opens by
+default (`--no-tui` disables it, `VELORA_TUI=0` too, `--curses` picks the
+classic view); pipes and CI stay batch automatically. `--progress json`
+emits `stage_start` / `stage_end` / `stage_skip` events, one JSON object
+per line.
+
+### Readiness: `velora doctor` per mode
+
+```bash
+velora doctor        # includes mode readiness: whitebox wants z3-solver,
+                     # blackbox is stdlib-only, bughunt wants a model (+ bridge)
+```
+
+Readiness lines are advisory (`WARN` prints the fix command, the exit code
+stays owned by the core checks).
+
 ## Scan
 
 **`velora scan` checks local source** (a file or directory — never a URL) with the symbolic engine; `--ai` adds the LLM layer. No model needed for symbolic scans.
@@ -136,7 +234,7 @@ On a TTY a scan opens the [live TUI](#live-tui) (pipe output or pass `--no-tui` 
 
 ## Live TUI
 
-**On a TTY, `velora scan` and `velora exploit` open a full-screen live view** — the command is the same, output is piped or `--no-tui` is passed:
+**On a TTY, `velora scan`, `velora exploit` and the three modes (`whitebox` / `blackbox` / `bughunt`) open a full-screen live view** — the command is the same, output is piped or `--no-tui` is passed:
 
 - `Tab` cycles panes (feed / progress / findings), `j` `k` `g` `G` `f` scroll
 - `r` opens the report preview (`s` saves it), `q` quits (asks before stopping a running agent)
@@ -356,6 +454,16 @@ One CLI for the whole workflow plus the solver. `velora <command> --help` prints
 | `velora scan <path>` | Scan local source (`<path>` = file or directory) for vulnerabilities. Symbolic by default; `--ai` adds the LLM layer (a missing endpoint is reported on stderr, not silently skipped). `-f json\|sarif`, `-o` (overwrites), `--fail-on <sev>` (default `high`), `--min-severity <sev>` (all formats + exit gate), `--repo-scale`, `--pattern`, `-l`. Exit `3` on unreadable files. |
 | `velora exploit --target <url>` | Agent against a live, authorized target. `--goal`, `--success-check`, `--guidance <findings.json\|->`, `--max-steps`, `--exec-timeout`, `--trace-out`, `--format json`. Exit 0 = verified success. |
 | `velora fix <path>` | Patch each finding, then re-scan to prove it's gone. `--guidance` (required), `--diff` / `--in-place` (`--in-place --diff` = write + show), `--no-verify`, `--format json`. Exit 0 when ≥1 patch applied. |
+
+### Testing modes
+
+| Command | What it does |
+|---------|--------------|
+| `velora whitebox --source <path>` | Source-first staged pipeline (15 stages). Stage grammar `--until` / `--from` / `--only` / `--skip` / `--with-*`, `--dry-run`, `--list-stages`, `--severity`, `-f json\|sarif`, `--no-tui` / `--curses`, `--progress json`. Session under `.velora/`. |
+| `velora blackbox <url>` | Target-first active pipeline (14 stages): scoped inert HTTP (GET/HEAD/OPTIONS by default, `--rate`, `--budget`), roles + `--auth-file` / `--auth-script` login flows, evidence capture + action timeline in the report. |
+| `velora bughunt <url>` | Looping LLM hypothesis hunt (16 stages): falsifiable hypotheses with elimination memory, gap analysis until convergence, bounty-grade report. `bughunt ledger\|gaps\|resume` inspect the loop (`--session` required). Implies `--ai`. |
+| `velora modes [mode]` | Show the three graphs side by side (or one mode in detail) with engine status; `-f json` for machines. Live from the registry — see [Capability matrix](capability-matrix.md). |
+| `velora sessions [list\|prune]` | Sessions are keep-all by default; `prune --keep N` (newest first) / `prune --all`, `--dry-run` previews, non-session dirs are never touched. |
 
 ### AI / setup
 

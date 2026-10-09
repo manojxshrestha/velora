@@ -1,4 +1,4 @@
-"""PentestGPT-style line REPL for velora scan/exploit runs.
+"""Interactive line REPL for velora scan/exploit runs.
 
 Opened by default on a TTY (see ``_run_tui_wrap`` in ``velora.cli``); the
 classic curses view stays available via ``--curses``.

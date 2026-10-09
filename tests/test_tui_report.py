@@ -76,3 +76,55 @@ def test_build_report_unsolved_and_unknown_severity():
 def test_default_report_name_shape():
     name = default_report_name()
     assert name.startswith("velora-report-") and name.endswith(".md")
+
+
+# -- action timeline appendix (evidence{} + trace.json -> report) ---------
+def test_timeline_appended_from_evidence():
+    evidence = [
+        {"method": "GET", "url": "http://x/login", "status": 200,
+         "elapsed_ms": 12},
+        {"method": "POST", "url": "http://x/api", "status": 500,
+         "elapsed_ms": 7, "final_url": "http://x/api/v2"},
+        {"method": "GET", "url": "http://x/gone", "error": "URLError: down"},
+    ]
+    md = build_report([], evidence=evidence)
+    assert "## Action timeline" in md
+    assert "1. `GET http://x/login` -> 200 · 12ms" in md
+    assert "2. `POST http://x/api` -> `http://x/api/v2` -> 500 · 7ms" in md
+    assert "3. `GET http://x/gone` · error: URLError: down" in md
+
+
+def test_timeline_absent_without_evidence_or_trace():
+    md = build_report([HIGH])
+    assert "## Action timeline" not in md
+
+
+def test_timeline_agent_turns_from_trace():
+    evidence = [{"method": "GET", "url": "http://x/", "status": 200}]
+    trace = {"transcript": [{"role": "assistant"}, {"role": "tool"}]}
+    md = build_report([], trace=trace, evidence=evidence)
+    assert "Exploit agent: 2 recorded turn(s) (trace.json)." in md
+
+
+def test_timeline_trace_only_still_renders():
+    md = build_report([], trace={"transcript": [{}]})
+    assert "## Action timeline" in md
+    assert "Exploit agent: 1 recorded turn(s)" in md
+
+
+def test_timeline_caps_long_evidence_trails():
+    evidence = [{"method": "GET", "url": f"http://x/{i}", "status": 200}
+                for i in range(150)]
+    md = build_report([], evidence=evidence)
+    assert "100. `GET http://x/99`" in md
+    assert "101." not in md
+    assert "... +50 earlier requests (see evidence.json)" in md
+
+
+def test_bounty_report_includes_timeline():
+    from velora.tui.report import build_bounty_report
+    md = build_bounty_report([], evidence=[
+        {"method": "GET", "url": "http://x/", "status": 200}])
+    assert "## Action timeline" in md
+    assert "1. `GET http://x/` -> 200" in md
+    assert build_bounty_report([]).count("## Action timeline") == 0

@@ -2,6 +2,8 @@
 logs/
 runs/
 velora-run.json
+.velora/
+velora_sessions/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

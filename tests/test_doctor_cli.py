@@ -211,3 +211,79 @@ class TestCmdDoctor:
                          "model", "bridge-required", "endpoints"):
             assert expected in ids
         assert "probe" not in ids
+
+
+class TestModeReadiness:
+    def test_mode_checks_present_and_advisory(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("VELORA_BRIDGE_HOME", str(tmp_path / "bridge"))
+        monkeypatch.setenv("VELORA_STATE_HOME", str(tmp_path / "state"))
+        ids = [c.id for c in run_checks(probe=False)]
+        for expected in ("mode-whitebox", "mode-blackbox", "mode-bughunt"):
+            assert expected in ids
+        # mode checks never fail the run on their own
+        for check in doctor_cli.mode_checks():
+            if check.id.startswith("mode-"):
+                assert check.status in (OK, WARN)
+
+    def test_whitebox_ready_with_z3(self):
+        z3 = pytest.importorskip("z3")
+        assert z3 is not None
+        check = doctor_cli.mode_checks()[0]
+        assert check.id == "mode-whitebox"
+        assert check.status == OK
+        assert "z3" in check.detail
+
+    def test_whitebox_warns_without_z3(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "z3", None)
+        check = doctor_cli.mode_checks()[0]
+        assert check.status == WARN
+        assert "z3-solver" in check.fix
+
+    def test_blackbox_always_ready(self):
+        check = doctor_cli.mode_checks()[1]
+        assert check.id == "mode-blackbox"
+        assert check.status == OK
+
+    def test_bughunt_blocked_without_model(self, monkeypatch):
+        monkeypatch.delenv("VELORA_LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("VELORA_LLM_MODEL", raising=False)
+        check = doctor_cli.mode_checks()[2]
+        assert check.status == WARN
+        assert "velora models tui" in check.fix
+
+    def test_bughunt_ready_with_local_model(self, monkeypatch):
+        from velora.sil import model_config
+        monkeypatch.delenv("VELORA_LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("VELORA_LLM_MODEL", raising=False)
+        model_config.save(provider="optiq",
+                          base_url="http://localhost:47317/v1",
+                          model="qwen", source="local")
+        check = doctor_cli.mode_checks()[2]
+        assert check.status == OK
+        assert "qwen" in check.detail
+
+    def test_bughunt_blocked_when_bridge_down(self, monkeypatch):
+        from velora.sil import model_config
+        monkeypatch.delenv("VELORA_LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("VELORA_LLM_MODEL", raising=False)
+        model_config.save(provider="opencode-bridge",
+                          base_url=bridge_cli.DEFAULT_BASE_URL,
+                          model="opencode/mimo", source="opencode-bridge")
+        monkeypatch.setattr(bridge_cli, "bridge_health",
+                            lambda port=0, timeout=0: False)
+        check = doctor_cli.mode_checks()[2]
+        assert check.status == WARN
+        assert "serve-bridge" in check.fix
+
+    def test_mode_warn_does_not_flip_ready(self):
+        assert doctor_cli.ready([Check("mode-bughunt", WARN, "blocked")])
+
+    def test_text_output_has_mode_header(self, monkeypatch, capsys):
+        monkeypatch.setattr(doctor_cli, "run_checks", lambda probe=False: [
+            Check("node", OK, "fine"),
+            Check("mode-blackbox", OK, "ready"),
+        ])
+        assert cmd_doctor(_args()) == 0
+        out = capsys.readouterr().out
+        assert "mode readiness:" in out
+        assert "mode-blackbox" in out

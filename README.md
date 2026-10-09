@@ -47,6 +47,7 @@ Velora is a *neuro-symbolic* system: a proof-producing **symbolic** core and a l
 
 - **Proof-producing symbolic core.** Entailments are decided by Z3, and scanner findings are tier-labelled (`symbolic` vs `llm`) and never conflated; the finding-level verification gate runs on every check, and confidence is evidence-weighted (a `1.0` stamp requires a solver witness).
 - **One CLI, the whole loop.** `scan` → `exploit` → `fix`, composed over a shared findings file.
+- **Three staged testing modes.** `velora whitebox --source <path>` (15-stage static pipeline), `velora blackbox <url>` (14-stage scoped active pipeline with scripted logins and evidence capture), `velora bughunt <url>` (looping LLM hypothesis hunt) — session-per-run with resume, and a published [capability matrix](docs/capability-matrix.md): a stage either has an engine or refuses loudly.
 - **Five symbolic frontends** (Python, Java, JS/TS, C/C++, C#) plus an LLM tier for any other language.
 - **Zero-key AI.** `velora setup` bootstraps a local bridge to opencode's free Zen tier — no API key is ever stored.
 - **Separation-logic solver built in** (`velora solve`), validated on SL-COMP and SMT-LIB.
@@ -82,7 +83,8 @@ Everything beyond the quick start lives in [`docs/`](docs/):
 | Guide | What's inside |
 |-------|---------------|
 | [Installation & Setup](docs/installation.md) | Requirements, install variants, zero-key AI setup, the bridge, environment variables, platform support |
-| [Usage & Commands](docs/usage.md) | Command pack of copy-pasteable examples for black-box, white-box & enterprise testing; the scan → exploit → fix loop explained flag by flag; AI & model setup; black-box bug-hunting guide; separation-logic solver; troubleshooting; grouped command reference |
+| [Usage & Commands](docs/usage.md) | Command pack of copy-pasteable examples for black-box, white-box & enterprise testing; the three staged modes (whitebox/blackbox/bughunt), stage grammar, sessions, auth scripts; the scan → exploit → fix loop explained flag by flag; AI & model setup; black-box bug-hunting guide; separation-logic solver; troubleshooting; grouped command reference |
+| [Capability matrix](docs/capability-matrix.md) | Per release: which stage runs in which mode, engine status per stage, honesty rules (partial / unavailable / n/a) |
 | [Detection](docs/detection.md) | Supported languages, 80+ vulnerability detectors, how detection works |
 | [AI Layer & Models](docs/ai-models.md) | LLM detection & triage, RAM & model requirements, model providers (zero-key, Zen, local) |
 | [Python API & Symbolic Core](docs/api.md) | Embedding Velora in Python; the separation-logic + Z3 foundation |
@@ -140,6 +142,15 @@ velora scan .                                            # confirm: fixed findin
 velora solve "ls(x, y) * ls(y, z) * x != z |- ls(x, z)"   # prints: VALID
 ```
 
+**6 — The three staged modes.** Full pipelines with sessions, resume, and a capability contract — source-first, target-first, or a looping LLM hunt:
+
+```bash
+velora whitebox --source . --dry-run     # plan a 15-stage static run, print it, run nothing
+velora blackbox https://target.tld       # 14-stage active run against an authorized target
+velora bughunt https://target.tld        # looping hypothesis hunt (needs a model)
+velora modes                             # all three graphs + engine status, side by side
+```
+
 Anatomy of a scan command:
 
 | Piece | Meaning |
@@ -185,6 +196,10 @@ Every command, grouped by what it's for — `velora <command> --help` prints all
 | [`velora scan <path>`](docs/usage.md#scan) | Scan local source (a file or directory — never a URL) for vulnerabilities; symbolic engine, `--ai` adds the LLM layer | `velora scan examples/app.py` |
 | [`velora exploit --target <url>`](docs/usage.md#exploit) | Drive an agent against a live, authorized target to build a working exploit; `--goal` states the objective, `--success-check` pins success to a shell command | `velora exploit --target http://localhost:8080 --goal 'read the admin secret'` |
 | [`velora fix <path>`](docs/usage.md#fix) | Patch each finding from `--guidance findings.json`, then re-scan to prove it's gone; `--diff` previews, `--in-place` writes | `velora fix examples/app.py --guidance findings.json --diff` |
+| [`velora whitebox --source <path>`](docs/usage.md#testing-modes-whitebox--blackbox--bughunt) | Source-first staged pipeline (15 stages) with session + resume; `--dry-run` prints the plan | `velora whitebox --source . --dry-run` |
+| [`velora blackbox <url>`](docs/usage.md#testing-modes-whitebox--blackbox--bughunt) | Target-first active pipeline (14 stages): scoped inert HTTP, roles + login scripts, evidence capture | `velora blackbox https://target.tld` |
+| [`velora bughunt <url>`](docs/usage.md#testing-modes-whitebox--blackbox--bughunt) | Looping LLM hypothesis hunt with elimination memory and a bounty-grade report | `velora bughunt https://target.tld` |
+| [`velora modes`](docs/capability-matrix.md) | The three stage graphs side by side, live engine status; `-f json` for machines | `velora modes` |
 
 ### AI / setup
 
@@ -206,6 +221,7 @@ Every command, grouped by what it's for — `velora <command> --help` prints all
 
 ## What next
 
+- **Run a staged campaign** — [Testing modes](docs/usage.md#testing-modes-whitebox--blackbox--bughunt): whitebox / blackbox / bughunt pipelines, stage grammar, sessions, auth scripts — with the [capability matrix](docs/capability-matrix.md) for what each mode covers.
 - **Patch what you find** — [Fix](docs/usage.md#fix): preview a minimal diff, apply it, and re-scan to *prove* the vulnerability is gone.
 - **Hunt bugs on a live target** — [Bug hunting guide](docs/usage.md#bug-hunting-guide-worked-example-targetcom): a full black-box campaign, step by step, with goal recipes per vulnerability class.
 - **Wire it into CI** — [Scan flags](docs/usage.md#scan): SARIF output + `--fail-on` severity gate for GitHub Actions.

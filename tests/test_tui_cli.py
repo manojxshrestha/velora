@@ -217,3 +217,110 @@ def test_report_no_inputs_empty_markdown(monkeypatch, capsys):
     args = _args(["report"])
     assert cmd_report(args) == 0
     assert capsys.readouterr().out.startswith("# Velora Security Report")
+
+
+# -- mode entries (whitebox / blackbox / bughunt) ------------------------
+def _force_tty(monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+
+def test_mode_args_expose_ui_flags(clean_env):
+    for raw in (["whitebox", "--source", ".", "--no-tui", "--curses"],
+                ["blackbox", "http://x", "--no-tui", "--curses"],
+                ["bughunt", "http://x", "--no-tui", "--curses"]):
+        args = _args(raw)
+        assert args.no_tui is True and args.curses is True
+
+
+def test_mode_gate_off_when_not_a_tty(clean_env):
+    for raw in (["whitebox", "--source", "."],
+                ["blackbox", "http://x"],
+                ["bughunt", "http://x"]):
+        assert _tui_active(_args(raw), raw) is False
+
+
+def test_mode_gate_off_with_no_tui_flag(clean_env, monkeypatch):
+    _force_tty(monkeypatch)
+    raw = ["blackbox", "http://x", "--no-tui"]
+    assert _tui_active(_args(raw), raw) is False
+
+
+def test_mode_dry_run_skips_tui_gate(clean_env, monkeypatch):
+    _force_tty(monkeypatch)
+    import velora.cli as cli_mod
+    calls = []
+    monkeypatch.setattr(cli_mod, "_run_tui_wrap",
+                        lambda args, raw: calls.append(raw) or 0)
+    assert cli_mod.main(["blackbox", "http://x", "--dry-run"]) == 0
+    assert calls == []
+
+
+def test_mode_list_stages_skips_tui_gate(clean_env, monkeypatch):
+    _force_tty(monkeypatch)
+    import velora.cli as cli_mod
+    calls = []
+    monkeypatch.setattr(cli_mod, "_run_tui_wrap",
+                        lambda args, raw: calls.append(raw) or 0)
+    assert cli_mod.main(["blackbox", "--list-stages"]) == 0
+    assert calls == []
+
+
+def test_mode_gate_fires_on_tty_and_passes_raw_argv(clean_env, monkeypatch):
+    _force_tty(monkeypatch)
+    import velora.cli as cli_mod
+    seen = {}
+    monkeypatch.setattr(cli_mod, "_run_tui_wrap",
+                        lambda args, raw: seen.update(raw=raw) or 42)
+    rc = cli_mod.main(["blackbox", "http://x"])
+    assert rc == 42
+    assert seen["raw"] == ["blackbox", "http://x"]
+
+
+def test_mode_wrap_builds_spec_with_subject_and_feed(clean_env, monkeypatch):
+    import velora.cli as cli_mod
+    seen = {}
+
+    class FakeRunner:
+        def __init__(self, spec):
+            seen["spec"] = spec
+
+        def child_done(self):
+            return True
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("velora.tui.runner.TuiRunner", FakeRunner)
+    monkeypatch.setattr(
+        "velora.ptui.run_ptui",
+        lambda runner, kind="", subject="": seen.update(
+            ui="ptui", kind=kind, subject=subject) or 0)
+
+    args = _args(["bughunt", "http://x"])
+    rc = cli_mod._run_tui_wrap(args, ["bughunt", "http://x"])
+    assert rc == 0
+    assert seen["ui"] == "ptui" and seen["kind"] == "bughunt"
+    assert seen["spec"].kind == "bughunt" and seen["spec"].feed is True
+    assert seen["spec"].subject == "http://x"
+
+    args2 = _args(["blackbox", "http://x"])
+    cli_mod._run_tui_wrap(args2, ["blackbox", "http://x"])
+    assert seen["spec"].kind == "blackbox" and seen["spec"].feed is False
+
+    args3 = _args(["whitebox", "--source", "src"])
+    cli_mod._run_tui_wrap(args3, ["whitebox", "--source", "src"])
+    assert seen["spec"].kind == "whitebox"
+    assert seen["spec"].subject == "src"
+
+
+def test_bughunt_session_subcommands_bypass_tui_gate(clean_env, monkeypatch):
+    _force_tty(monkeypatch)
+    import velora.cli as cli_mod
+    calls = []
+    monkeypatch.setattr(cli_mod, "_run_tui_wrap",
+                        lambda args, raw: calls.append(raw) or 99)
+    rc = cli_mod._run_mode("bughunt", _args(["bughunt", "ledger"]),
+                           ["bughunt", "ledger"])
+    assert calls == []
+    assert rc != 99

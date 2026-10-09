@@ -149,7 +149,7 @@ def create_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument(
         "--curses", action="store_true",
         help="Open the classic curses TUI instead of the default "
-             "PentestGPT-style interface (TTY only)."
+             "interactive line interface (TTY only)."
     )
 
     # === EXPLOIT command ===
@@ -210,7 +210,7 @@ def create_parser() -> argparse.ArgumentParser:
     exploit_parser.add_argument(
         "--curses", action="store_true",
         help="Open the classic curses TUI instead of the default "
-             "PentestGPT-style interface (TTY only)."
+             "interactive line interface (TTY only)."
     )
 
     # === REPORT command ===
@@ -507,7 +507,333 @@ def create_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--no-probe", action="store_true",
                               help="Skip the live keyless probe chat")
 
+    # === MODE commands: whitebox / blackbox / bughunt + `velora modes` ===
+    _add_mode_commands(subparsers)
+
     return parser
+
+
+# ============================================================================
+# MODE commands: whitebox / blackbox / bughunt + `velora modes` (§8)
+# ============================================================================
+
+_SEVERITY_CHOICES = ["critical", "high", "medium", "low", "info"]
+_FAIL_ON_CHOICES = ["critical", "high", "medium", "low", "any", "none"]
+
+
+def _add_shared_mode_flags(p, *, mode_id: str) -> None:
+    inp = p.add_argument_group("input / aim / session")
+    inp.add_argument("--source", default=None,
+                     help="Code input (whitebox required, bughunt optional): "
+                          "dir or file, absolute or relative")
+    inp.add_argument("--guidance", default=None,
+                     help="Seed findings file; `-` = stdin (session "
+                          "findings.json wins when both exist)")
+    inp.add_argument("--goal", default=None,
+                     help="Objective threaded into PLAN / HUNT / HYPOTHESIZE / "
+                          "EXPLOIT prompts (in bughunt it drives convergence)")
+    inp.add_argument("--success-check", default=None,
+                     help="Oracle command: exit 0 = goal achieved (VERIFY/EXPLOIT "
+                          "and loop exit)")
+    inp.add_argument("--scope", action="append", default=None, metavar="HOST",
+                     help="In-scope host (repeatable); guard input, not a stage flag")
+    inp.add_argument("--scope-file", default=None, metavar="FILE",
+                     help="File of in-scope hosts; `-` = stdin")
+    inp.add_argument("--session", default=None, metavar="DIR",
+                     help="Session dir (default .velora/<mode>-<hash>; "
+                          "env VELORA_SESSION)")
+
+    budget = p.add_argument_group("budgets")
+    budget_default = (
+        100 if mode_id == "bughunt" else (500 if mode_id == "blackbox" else None)
+    )
+    budget.add_argument("--budget", type=int, default=budget_default, metavar="N",
+                        help="Whole-run wallet ("
+                             + (f"default {budget_default} "
+                                + ("HTTP requests" if mode_id == "blackbox"
+                                   else "LLM steps")
+                                if budget_default else "optional")
+                             + "; unit per mode — bughunt: LLM steps, "
+                               "blackbox: HTTP requests, whitebox: LLM steps "
+                               "for AI stages; static work is free)")
+    if mode_id == "bughunt":
+        budget.add_argument("--time-budget", type=int, default=None, metavar="M",
+                            help="Wall-clock minutes for the bughunt loop")
+        budget.add_argument("--max-loop", type=int, default=None, metavar="N",
+                            help="SEARCH→HUNT iterations before stopping")
+        budget.add_argument("--classes", default=None, metavar="LIST",
+                            help="Comma-separated bug classes to focus (e.g. logic,authz,race)")
+        budget.add_argument("--hypotheses", default=None, metavar="FILE",
+                            help="Seed hypothesis ledger; `-` = stdin")
+
+    ai = p.add_argument_group("AI / model")
+    ai.add_argument("--ai", action="store_true",
+                    default=(mode_id == "bughunt"),
+                    help="Opt in for LLM stages (bughunt implies it)")
+
+    out = p.add_argument_group("output / gate / filter")
+    out.add_argument("-f", "--format", default="text",
+                     choices=["text", "json", "sarif"],
+                     help="Output format (default: text)")
+    out.add_argument("-o", "--output", default=None,
+                     help="Output file (default: stdout)")
+    out.add_argument("--trace-out", default=None, metavar="FILE",
+                     help="Write the agent/evidence trace to FILE")
+    out.add_argument("--severity", default=None, choices=_SEVERITY_CHOICES,
+                     help="Sugar: sets --min-severity and --fail-on to SEV "
+                          "(report SEV+, exit 1 on SEV+)")
+    out.add_argument("--fail-on", default=None, choices=_FAIL_ON_CHOICES,
+                     help="Exit 1 threshold (default: high; a THRESHOLD: high = "
+                          "high+critical trigger; none = never fail)")
+    out.add_argument("--min-severity", default=None, choices=_SEVERITY_CHOICES,
+                     help="Display floor — never changes the exit code "
+                          "(default: low)")
+    out.add_argument("--asset", default=None, metavar="KIND[,…]",
+                     help="Operate only on these asset kinds (default: all the "
+                          "mode supports)")
+
+    model = p.add_argument_group("model / UX")
+    model.add_argument("--model", default=None,
+                       help="Override VELORA_LLM_MODEL (flag > VELORA_LLM_* > "
+                            "config > bridge)")
+    model.add_argument("--base-url", default=None,
+                       help="LLM base URL (flag > VELORA_LLM_BASE_URL > config > bridge)")
+    model.add_argument("--max-steps", type=int, default=None, metavar="N",
+                       help="Model turns one agent run may take (the per-run "
+                            "leash, default 40; bounds EXPLOIT/agent invocations)")
+    model.add_argument("--exec-timeout", type=int, default=None, metavar="S",
+                       help="Seconds before an exploit command times out")
+    model.add_argument("--no-tui", action="store_true",
+                       help="Force batch even on a TTY")
+    model.add_argument("--quiet", action="store_true",
+                       help="Only errors on stderr")
+    model.add_argument("-v", "--verbose", action="store_true",
+                       help="Verbose output")
+
+
+def _add_mode_commands(subparsers) -> None:
+    from velora.modes.common import MODE_SPECS, mode_help_epilog
+
+    for mode_id, blurb in (
+        ("whitebox", "source-first: 15-stage static pipeline "
+                     "(INGEST → … → VALIDATE → REPORT)"),
+        ("blackbox", "target-first: 14-stage active pipeline "
+                     "(RECON → SURFACE → ENUMERATION → … → REPORT)"),
+        ("bughunt", "looping hunt: 16-stage goal-driven loop "
+                    "(HUNT → DEEPTHINK → … → SEARCH ↺ → REPORT)"),
+    ):
+        mode = MODE_SPECS[mode_id]
+        p = subparsers.add_parser(
+            mode_id,
+            help=f"{mode.label} mode — {blurb}",
+            description=f"Velora {mode.label} mode.\n{blurb}",
+            epilog=mode_help_epilog(mode),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        if mode_id == "whitebox":
+            p.add_argument("--target", default=None, metavar="URL",
+                           help="Optional live target: enables VERIFY(live) + EXPLOIT")
+        else:
+            p.add_argument("target", nargs="?", default=None,
+                           help="URL, or a file of one URL per line")
+            p.add_argument("--target", dest="target_alias", default=None,
+                           metavar="URL", help="Alias for the target positional")
+        _add_shared_mode_flags(p, mode_id=mode_id)
+
+        if mode_id == "whitebox":
+            scan = p.add_argument_group("scan (inherits velora scan flags)")
+            scan.add_argument("-l", "--language", default=None,
+                              help="Source language (default: python; auto-detected by extension)")
+            scan.add_argument("-p", "--pattern", default=None,
+                              help="Glob pattern for directory scan (default: **/*.py)")
+            scan.add_argument("--no-default-excludes", action="store_true",
+                              help="Also scan agent/tool state and dependency dirs")
+            scan.add_argument("--no-verify", action="store_true",
+                              help="Skip Velora verification during SCAN (faster, "
+                                   "may have false positives; use --skip verify to "
+                                   "drop the VERIFY stage)")
+            scan.add_argument("--llm-detect", action="store_true",
+                              help="Enable LLM detection only")
+            scan.add_argument("--llm-triage", action="store_true",
+                              help="Enable LLM triage only")
+            scan.add_argument("--repo-scale", action="store_true",
+                              help="One LLM session for the whole repository")
+            scan.add_argument("--timeout", type=int, default=None,
+                              help="Verification timeout in ms (default: 5000)")
+            plan = p.add_argument_group("plan")
+            plan.add_argument("--context-lines", type=int, default=20,
+                              help="Source-slice size around hits (default: 20)")
+            fix = p.add_argument_group("fix")
+            fix.add_argument("--in-place", action="store_true",
+                             help="Apply patches in place")
+            fix.add_argument("--diff", action="store_true",
+                             help="Print unified diff of proposed patches")
+        elif mode_id == "blackbox":
+            auth = p.add_argument_group("auth / connection")
+            auth.add_argument("--auth-file", action="append", default=None,
+                              metavar="[ROLE=]FILE",
+                              help="Cookie/header file (repeatable; optional ROLE= prefix; stored as references in the session)")
+            auth.add_argument("--auth-script", action="append", default=None,
+                              metavar="[ROLE=]FILE",
+                              help="JSON login-flow script run at AUTH (credentials via ${ENV}; values never stored)")
+            auth.add_argument("--header", action="append", default=None,
+                              metavar='"K: V"',
+                              help="Request header (repeatable; value never stored in plaintext)")
+            auth.add_argument("--proxy", default=None, metavar="URL",
+                              help="HTTP(S) proxy for all requests")
+            auth.add_argument("-k", "--insecure", action="store_true",
+                              help="Skip TLS certificate verification")
+            auth.add_argument("--user-agent", default=None, metavar="STR",
+                              help="Override the User-Agent string")
+            act = p.add_argument_group("activity")
+            act.add_argument("--rate", type=float, default=None, metavar="R",
+                             help="Requests per second (rate cap)")
+            act.add_argument("--depth", type=int, default=None, metavar="N",
+                             help="Crawl depth bound")
+            act.add_argument("--pages", type=int, default=None, metavar="N",
+                             help="Max pages to fetch")
+            act.add_argument("--seed", action="append", default=None, metavar="URL",
+                             help="Seed URL for recon (repeatable)")
+            act.add_argument("--active", action="store_true",
+                             help="Allow state-changing verbs (default: inert)")
+        else:
+            auth = p.add_argument_group("auth")
+            auth.add_argument("--auth-file", action="append", default=None,
+                              metavar="[ROLE=]FILE",
+                              help="Cookie/header file (repeatable; optional ROLE= prefix; stored as references in the session)")
+            auth.add_argument("--auth-script", action="append", default=None,
+                              metavar="[ROLE=]FILE",
+                              help="JSON login-flow script run at AUTH (credentials via ${ENV}; values never stored)")
+            auth.add_argument("--header", action="append", default=None,
+                              metavar='"K: V"',
+                              help="Request header (repeatable; value never stored in plaintext)")
+
+        from velora.modes.common import add_stage_flags
+
+        add_stage_flags(p, mode)
+
+    modes_parser = subparsers.add_parser(
+        "modes",
+        help="Show the three mode graphs side by side (live from the registry)",
+        description="Inventory: stage membership, default pipelines, engine status.",
+    )
+    modes_parser.add_argument("mode", nargs="?", default=None,
+                              choices=["whitebox", "blackbox", "bughunt"],
+                              help="Show one mode's stage list in detail")
+    modes_parser.add_argument("-f", "--format", default="text",
+                              choices=["text", "json"],
+                              help="Output format (default: text)")
+
+    sessions_parser = subparsers.add_parser(
+        "sessions",
+        help="List or prune archived sessions under .velora/",
+        description="Sessions are kept by default (keep-all); prune "
+                    "explicitly with --keep N (newest first) or --all.",
+    )
+    sessions_sub = sessions_parser.add_subparsers(dest="action")
+    sessions_sub.add_parser("list",
+                            help="List sessions, newest first (default)")
+    prune = sessions_sub.add_parser(
+        "prune",
+        help="Delete old sessions (--keep N or --all; --dry-run previews)",
+    )
+    prune.add_argument("--keep", type=int, default=None, metavar="N",
+                       help="Keep the N newest sessions, delete the rest")
+    prune.add_argument("--all", action="store_true", dest="all_sessions",
+                       help="Delete every session (pair with --dry-run to preview)")
+    prune.add_argument("--dry-run", action="store_true",
+                       help="Print what would be deleted, delete nothing")
+
+
+def cmd_modes(args) -> int:
+    from velora.modes.common import (
+        MODE_SPECS,
+        format_modes_overview,
+        format_stage_list,
+    )
+
+    if args.mode:
+        print(format_stage_list(MODE_SPECS[args.mode],
+                                as_json=args.format == "json"))
+    else:
+        print(format_modes_overview(as_json=args.format == "json"))
+    return 0
+
+
+def cmd_sessions(args) -> int:
+    """List / prune archived sessions under .velora/ (keep-all default)."""
+    import shutil
+
+    root = Path(".velora")
+
+    def _sessions() -> List[Path]:
+        if not root.is_dir():
+            return []
+        dirs = [p for p in root.iterdir()
+                if p.is_dir() and (p / "session.json").is_file()]
+        dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return dirs
+
+    action = getattr(args, "action", None) or "list"
+    if action == "list":
+        dirs = _sessions()
+        if not dirs:
+            print("no sessions in .velora/")
+            return 0
+        for d in dirs:
+            stat = d.stat()
+            mtime = time.strftime("%Y-%m-%d %H:%M:%S",
+                                  time.localtime(stat.st_mtime))
+            size_kb = sum(f.stat().st_size for f in d.rglob("*")
+                          if f.is_file()) // 1024
+            print(f"{d.name}\t{mtime}\t{size_kb}KB")
+        return 0
+    if action == "prune":
+        keep = getattr(args, "keep", None)
+        everything = getattr(args, "all_sessions", False)
+        dry = getattr(args, "dry_run", False)
+        if keep is None and not everything:
+            print("velora: error: sessions prune: specify --keep N or --all "
+                  "(sessions are kept by default)", file=sys.stderr)
+            return 2
+        if keep is not None and keep < 0:
+            print("velora: error: sessions prune: --keep must be >= 0",
+                  file=sys.stderr)
+            return 2
+        dirs = _sessions()
+        victims = list(dirs) if everything else dirs[keep:]
+        if not victims:
+            print("nothing to prune")
+            return 0
+        for d in victims:
+            if dry:
+                print(f"would remove {d.name}")
+            else:
+                shutil.rmtree(d)
+                print(f"removed {d.name}")
+        return 0
+    print(f"velora: error: unknown sessions action {action!r}",
+          file=sys.stderr)
+    return 2
+
+
+def _run_mode(mode_id: str, args, _raw_argv: Optional[List[str]] = None) -> int:
+    from velora.modes import run_mode
+
+    if mode_id == "bughunt" and getattr(args, "target", None) in (
+        "ledger", "gaps", "resume",
+    ):
+        from velora.modes.bughunt import run_subcommand
+
+        return run_subcommand(args.target, args)
+
+    raw = list(_raw_argv) if _raw_argv is not None else list(sys.argv[1:])
+    # Quick artifact flags print and exit -- no interactive shell for those.
+    quick = (getattr(args, "dry_run", False)
+             or getattr(args, "list_stages", False))
+    if not quick and _tui_active(args, raw):
+        return _run_tui_wrap(args, raw)
+    return run_mode(mode_id, args)
 
 
 # ============================================================================
@@ -522,10 +848,11 @@ def _apply_model_override(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Live TUI gate: documented `velora exploit` / `velora scan` open the curses
-# TUI on a terminal, spawn the exact same command as a piped child, and paint
-# its output.  Non-TTY runs (pipes, redirects, tests) are byte-identical to
-# the plain path -- the gate never fires there.
+# Live TUI gate: documented `velora scan` / `velora exploit` / the three
+# modes open the interactive view on a terminal, spawn the exact same
+# command as a piped child, and paint its output.  Non-TTY runs (pipes,
+# redirects, tests) are byte-identical to the plain path -- the gate never
+# fires there.
 # ---------------------------------------------------------------------------
 
 def _tui_active(args, raw_argv: List[str]) -> bool:
@@ -546,9 +873,9 @@ def _tui_active(args, raw_argv: List[str]) -> bool:
 def _run_tui_wrap(args, raw_argv: List[str]) -> int:
     """Spawn today's command as a child and hand its stream to the TUI.
 
-    Default on a TTY: the PentestGPT-style line interface (``velora.ptui``).
+    Default on a TTY: the interactive line interface (``velora.ptui``).
     ``--curses`` (or VELORA_UI=curses) selects the classic curses view; if the
-    PentestGPT interface cannot load (missing deps) or crashes, we fall back
+    line interface cannot load (missing deps) or crashes, we fall back
     to curses and finally to today's plain run.
     """
     from velora.tui.render import run_tui
@@ -558,8 +885,9 @@ def _run_tui_wrap(args, raw_argv: List[str]) -> int:
     spec = RunSpec(
         argv=child_argv(list(raw_argv)),
         kind=kind,
-        feed=(kind == "exploit"),
-        subject=getattr(args, "target", "") or "",
+        feed=(kind in ("exploit", "bughunt")),
+        subject=(getattr(args, "target", "") or getattr(args, "source", "")
+                 or ""),
         guidance_path=getattr(args, "guidance", None),
         trace_out=getattr(args, "trace_out", None),
         findings_out=(getattr(args, "output", None)
@@ -586,7 +914,7 @@ def _run_tui_wrap(args, raw_argv: List[str]) -> int:
             try:
                 return run_ptui(runner, kind=kind, subject=spec.subject)
             except Exception:
-                # PentestGPT-style view failed: stop its child, retry with a
+                # Interactive line view failed: stop its child, retry with a
                 # fresh runner under the classic curses view.
                 _stop_quiet()
                 runner = TuiRunner(spec)
@@ -1623,13 +1951,22 @@ def main(argv: List[str] = None) -> int:
         "serve-bridge": _cmd_serve_bridge,
         "doctor": _cmd_doctor,
         "setup": _cmd_setup,
+        "modes": cmd_modes,
+        "sessions": cmd_sessions,
+        "whitebox": lambda a, _raw_argv=None: _run_mode(
+            "whitebox", a, _raw_argv),
+        "blackbox": lambda a, _raw_argv=None: _run_mode(
+            "blackbox", a, _raw_argv),
+        "bughunt": lambda a, _raw_argv=None: _run_mode(
+            "bughunt", a, _raw_argv),
     }
 
     handler = commands.get(args.command)
     if handler:
         from velora.sil.llm_client import LLMUnavailableError
         try:
-            if args.command in ("scan", "exploit"):
+            if args.command in ("scan", "exploit", "whitebox", "blackbox",
+                                "bughunt"):
                 return handler(args, _raw_argv=raw_argv)
             return handler(args)
         except KeyboardInterrupt:

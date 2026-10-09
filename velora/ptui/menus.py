@@ -1,9 +1,8 @@
-"""Tab-completed command menus for the PentestGPT-style interface.
+"""Tab-completed command menus for the interactive line interface.
 
-Mirrors PentestGPT's ``utils/task_handler.py``: a main-task verb prompt and a
-local (sub-task) verb prompt, both with per-verb rich descriptions, an
-``Invalid task, try again.`` re-prompt loop, and a printable help page.
-Verbs are PentestGPT's exact set; semantics map onto velora's existing
+A main-task verb prompt and a local (sub-task) verb prompt, both with
+per-verb rich descriptions, an ``Invalid task, try again.`` re-prompt loop,
+and a printable help page. Verb semantics map onto velora's existing
 workflow (see ``velora.ptui.session``).
 """
 

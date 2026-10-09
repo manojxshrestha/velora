@@ -315,7 +315,10 @@ handling.
 | `solve/check/parse/repl` | `cli.py` | solver front-ends, no LLM |
 | `models` | `models_cli.py` / `models_tui.py` | picker + `use` |
 | `serve-bridge` | `bridge_cli.py` | Node bridge lifecycle (PID file + cmdline identity check, BUG-015 fixed; per-session bearer token, BUG-013) |
-| `doctor` / `setup` | `doctor_cli.py` / `setup_cli.py` | zero-key diagnosis/bootstrap |
+| `doctor` / `setup` | `doctor_cli.py` / `setup_cli.py` | zero-key diagnosis/bootstrap (incl. per-mode readiness checks) |
+| `whitebox` / `blackbox` / `bughunt` | `cli.py::_run_mode` → `modes/` | staged pipelines; orchestrators hold stage order only, logic lives in `engines/assets/active`; TUI gate on TTY; stage grammar `--until/--from/--only/--skip/--with-*` |
+| `modes` | `cli.py::cmd_modes` → `modes/common.py` | graphs + engine status live from the registry (text/JSON) |
+| `sessions` | `cli.py::cmd_sessions` | list / prune archived sessions under `.velora/` (keep-all default) |
 
 Exit codes *as implemented*: `0` success · `1` findings/invalid/tool error ·
 `2` LLM unreachable (clean `error: ...`, no traceback — `main()` maps
@@ -330,7 +333,8 @@ on the installed `velora scan` parser.
 ## 10. Interactive views
 
 - **Line view (default on TTY)**: prompt-toolkit + rich (`velora/ptui/`),
-  both declared as core dependencies (BUG-021 fixed).
+  both declared as core dependencies (BUG-021 fixed). Opened by `scan`,
+  `exploit`, and the three modes; `--no-tui` / `VELORA_TUI=0` force batch.
 - **Curses view**: `velora/tui/` (`--curses`).
 - **REPL**: `velora repl` — parser-level, prints verdicts, no LLM.
 

@@ -2,8 +2,8 @@
 
 How Velora's language-model layer works: model configuration, the shared agent
 loop, every prompt, every tool, termination rules, and how failures are
-handled. Grounded in the code at `main` @ `cf6aabf`; the October 2026 audit's
-deviations are fixed in place and pinned by `tests/test_bugfix_regressions.py`.
+handled. Grounded in the code on `main`; the audit's deviations are fixed in
+place and pinned by `tests/test_bugfix_regressions.py`.
 
 ## 1. Layers
 

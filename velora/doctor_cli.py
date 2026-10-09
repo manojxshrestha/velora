@@ -223,6 +223,45 @@ def _check_probe() -> Check:
                                "`opencode serve` logs; retry later")
 
 
+def mode_checks() -> List[Check]:
+    """Per-mode readiness (finalplan §10): advisory, never flips the exit.
+
+    Core checks above already FAIL on missing model/bridge/z3; these three
+    summarize, per mode, whether its default run can start right now.
+    """
+    try:
+        import z3  # noqa: F401
+        whitebox = Check(
+            "mode-whitebox", OK,
+            "ready (source scan: z3 + stdlib; no network/LLM required)",
+        )
+    except Exception:  # noqa: BLE001
+        whitebox = Check("mode-whitebox", WARN,
+                         "blocked: z3 is missing",
+                         "pip install z3-solver")
+    blackbox = Check(
+        "mode-blackbox", OK,
+        "ready (scoped stdlib HTTP client; LLM optional for AI exploit)",
+    )
+    base, model, provider, _source = _active_model()
+    if not model or not base:
+        bughunt = Check("mode-bughunt", WARN,
+                        "blocked: no active model (hunt/deepthink need an LLM)",
+                        "velora models tui")
+    elif _needs_bridge(base, provider) and not bridge_cli.bridge_health(
+        bridge_cli.DEFAULT_PORT
+    ):
+        bughunt = Check("mode-bughunt", WARN,
+                        "blocked: bridge-backed model is down",
+                        "velora serve-bridge --start")
+    else:
+        bughunt = Check(
+            "mode-bughunt", OK,
+            f"ready (LLM active: {model} for hunt/deepthink)",
+        )
+    return [whitebox, blackbox, bughunt]
+
+
 def run_checks(probe: bool = False) -> List[Check]:
     checks = [_check_platform(), _check_python(), _check_node(),
               _check_opencode(), _check_sources(), _check_runtime(),
@@ -230,6 +269,7 @@ def run_checks(probe: bool = False) -> List[Check]:
               _check_endpoints()]
     if probe:
         checks.append(_check_probe())
+    checks.extend(mode_checks())
     return checks
 
 
@@ -250,7 +290,11 @@ def cmd_doctor(args) -> int:
         return 0 if ok else 1
 
     print("velora doctor")
+    modes_header = False
     for c in checks:
+        if c.id.startswith("mode-") and not modes_header:
+            modes_header = True
+            print("\n  mode readiness:")
         print(f"  {_MARK[c.status]} {c.id:<16} {c.detail}")
         if c.fix and c.status != OK:
             print(f"       fix: {c.fix}")

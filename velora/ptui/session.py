@@ -1,10 +1,10 @@
-"""PentestGPT-style interactive session for velora scan/exploit runs.
+"""Interactive line session for velora scan/exploit runs.
 
-Recreates the PentestGPT (USENIX Security 2024) terminal experience: a green
-settings banner, the workflow auto-started under a rich status spinner with
-live output, then a line-oriented command loop with tab-completed verbs
-(``next more todo discuss google help quit``), radio-list menus, multiline
-input submitted with shift+right-arrow, styled replies, and save-on-quit.
+A green settings banner, the workflow auto-started under a rich status
+spinner with live output, then a line-oriented command loop with
+tab-completed verbs (``next more todo discuss google help quit``),
+radio-list menus, multiline input submitted with shift+right-arrow, styled
+replies, and save-on-quit.
 
 The backend is untouched: the same child process + :class:`TuiRunner` the
 curses view uses supplies every event printed here.
@@ -66,7 +66,7 @@ _SEVERITY_STYLE: Dict[str, str] = {
 
 
 class VeloraSession:
-    """One PentestGPT-style interactive session over a velora run."""
+    """One interactive session over a velora run."""
 
     postfix_options: Dict[str, str] = {
         "tool": "The input content is from a security testing tool. "
@@ -168,7 +168,7 @@ class VeloraSession:
             self._print_event(ev)
 
     def initialize(self) -> None:
-        """Start the child and stream its run to completion (PentestGPT-style)."""
+        """Start the child and stream its run to completion."""
         with self.console.status("[bold green] Initializing workflow..."):
             self.runner.start()
         self._stream()
@@ -467,6 +467,6 @@ class VeloraSession:
 
 
 def run_ptui(runner, kind: str = "exploit", subject: str = "") -> int:
-    """Open the PentestGPT-style interface over ``runner``; return its exit code."""
+    """Open the interactive line interface over ``runner``; return its exit code."""
     session = VeloraSession(runner, kind=kind, subject=subject)
     return session.main()

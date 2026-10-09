@@ -1,8 +1,8 @@
-"""Prompt-layer helpers for the PentestGPT-style interface.
+"""Prompt-layer helpers for the interactive line interface.
 
-Mirrors PentestGPT's ``utils/prompt_select.py`` (GreyDGL/PentestGPT, MIT):
-radio-list selection menus, multiline input where Enter inserts a newline and
-shift+right-arrow submits, and the ``- N -`` / ``->`` continuation gutter.
+Radio-list selection menus, multiline input where Enter inserts a newline
+and shift+right-arrow submits, and the ``- N -`` / ``->`` continuation
+gutter.
 """
 
 from __future__ import annotations

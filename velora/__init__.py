@@ -40,7 +40,7 @@ from velora.predicates import (
     ListSegment, Tree, GenericPredicate
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     # Core formulas and expressions
     "Formula", "Emp", "PointsTo", "SepConj", "Wand", "And", "Or", "Not",

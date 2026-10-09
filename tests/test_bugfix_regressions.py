@@ -789,11 +789,13 @@ def test_bug013_env_token_overrides_state(monkeypatch, tmp_path):
     assert bridge_cli.bridge_token() == "from-env"
 
 
-def test_bug013_llm_client_bridge_uses_token_not_placeholder(monkeypatch):
+def test_bug013_llm_client_bridge_uses_token_not_placeholder(monkeypatch, tmp_path):
     """Against the secured bridge the LLM transport must send the session
     token -- never the `sk-local` placeholder -- and must never send the
     bridge token to a foreign endpoint."""
     from velora.sil.llm_client import LLMClient, LLMConfig
+    # isolate from any bridge state on this machine (0600 token file)
+    monkeypatch.setenv("VELORA_STATE_HOME", str(tmp_path))
     monkeypatch.setenv("VELORA_BRIDGE_TOKEN", "bridge-secret")
     bridge = LLMClient(LLMConfig(base_url="http://127.0.0.1:8399/v1",
                                  api_key="sk-local", model="m"))
